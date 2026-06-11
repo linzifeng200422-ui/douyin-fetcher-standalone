@@ -1,0 +1,5 @@
+# 抖音视频解析与文案提取工具 (独立开源版) 依赖项
+# 请确保系统已通过外部手段安装 ffmpeg 命令行工具以供转码使用 (macOS: brew install ffmpeg)
+
+# 仅在需要使用本地 Whisper ASR 语音识别服务时安装此包：
+openai-whisper

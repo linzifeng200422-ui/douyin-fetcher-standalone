@@ -1,0 +1,18 @@
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 媒体下载临时目录
+downloads/
+temp_video.mp4
+
+# 用户敏感凭据
+cookie.txt
+.auth/
+
+# macOS 系统残留
+.DS_Store
+venv/
+.venv/
+*.dylib
+*.so
