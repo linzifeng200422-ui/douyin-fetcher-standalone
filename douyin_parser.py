@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import subprocess
 import urllib.parse
@@ -147,35 +148,37 @@ def run_whisper_transcription(audio_path: Path, output_dir: Path, whisper_path: 
         return False
 
   # 兜底方案：检测并使用全局的 whisper CLI (openai-whisper)
-  try:
-    # 探查环境 PATH 里有没有全局命令
-    subprocess.run(["whisper", "--version"], capture_output=True, check=True)
-    logger.info("检测到全局 whisper 指令，开始在后台运行 ASR 转写流程...")
-    
-    cmd = [
-      "whisper", str(audio_path),
-      "--output_dir", str(output_dir),
-      "--output_format", "txt",
-      "--model", "base",
-      "--language", "zh"
-    ]
-    subprocess.run(cmd, check=True, capture_output=True)
-    
-    generated_txt = output_dir / f"{audio_path.stem}.txt"
-    if generated_txt.is_file():
-      text_content = generated_txt.read_text(encoding="utf-8")
-      transcript_path.write_text(text_content, encoding="utf-8")
-      generated_txt.unlink() # 移除临时转换格式
+  whisper_bin = shutil.which("whisper")
+  if whisper_bin:
+    try:
+      logger.info("检测到全局 whisper 指令，开始在后台运行 ASR 转写流程...")
       
-      # 移除 whisper 默认生成的其他附带多媒体格式文件
-      for ext in ["vtt", "srt", "tsv", "json"]:
-        tmp_file = output_dir / f"{audio_path.stem}.{ext}"
-        if tmp_file.is_file():
-          tmp_file.unlink()
-          
-      return True
-  except Exception as e:
-    logger.warning(f"系统 PATH 中没有发现可用的全局 whisper 命令行工具: {e}")
+      cmd = [
+        whisper_bin, str(audio_path),
+        "--output_dir", str(output_dir),
+        "--output_format", "txt",
+        "--model", "base",
+        "--language", "zh"
+      ]
+      subprocess.run(cmd, check=True, capture_output=True)
+      
+      generated_txt = output_dir / f"{audio_path.stem}.txt"
+      if generated_txt.is_file():
+        text_content = generated_txt.read_text(encoding="utf-8")
+        transcript_path.write_text(text_content, encoding="utf-8")
+        generated_txt.unlink() # 移除临时转换格式
+        
+        # 移除 whisper 默认生成的其他附带多媒体格式文件
+        for ext in ["vtt", "srt", "tsv", "json"]:
+          tmp_file = output_dir / f"{audio_path.stem}.{ext}"
+          if tmp_file.is_file():
+            tmp_file.unlink()
+            
+        return True
+    except Exception as e:
+      logger.error(f"Whisper ASR 转写运行时发生异常: {e}")
+  else:
+    logger.warning("系统 PATH 中没有发现可用的全局 whisper 命令行工具，跳过语音转写。")
   
   return False
 
