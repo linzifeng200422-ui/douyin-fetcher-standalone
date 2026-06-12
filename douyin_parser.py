@@ -21,6 +21,7 @@ from external_backends import (
   YtDlpItem,
   fetch_user_posts_with_f2,
   looks_like_douyin_url,
+  probe_ytdlp_items,
   run_ytdlp_audio,
 )
 
@@ -610,6 +611,11 @@ def process_aweme_list(
         download_file(audio_url, audio_path, cookie_str)
         sample_status["media_downloaded"] = True
         sample_status["audio_ready"] = True
+      except KeyboardInterrupt:
+        sample_status["status"] = "interrupted"
+        sample_status["notes"].append("interrupted during audio download")
+        write_sample_status(video_dir, sample_status)
+        raise
       except Exception as e:
         logger.error(f"音频文件下载失败: {e}")
         sample_status["status"] = "download_failed"
@@ -631,6 +637,11 @@ def process_aweme_list(
         subprocess.run(cmd_ffmpeg, check=True, capture_output=True)
         sample_status["audio_ready"] = True
         logger.info("FFmpeg 音轨转码成功！")
+      except KeyboardInterrupt:
+        sample_status["status"] = "interrupted"
+        sample_status["notes"].append("interrupted during video download or ffmpeg")
+        write_sample_status(video_dir, sample_status)
+        raise
       except Exception as e:
         logger.error(f"媒体流抓取或转码发生异常: {e}")
         sample_status["status"] = "download_failed"
@@ -643,13 +654,19 @@ def process_aweme_list(
           temp_video.unlink()
 
     write_meta_file(video_dir, aweme, nickname)
-    finalize_transcript(
-      audio_path,
-      video_dir,
-      sample_status,
-      skip_asr=skip_asr,
-      whisper_path=whisper_path,
-    )
+    try:
+      finalize_transcript(
+        audio_path,
+        video_dir,
+        sample_status,
+        skip_asr=skip_asr,
+        whisper_path=whisper_path,
+      )
+    except KeyboardInterrupt:
+      sample_status["status"] = "interrupted"
+      sample_status["notes"].append("interrupted during asr")
+      write_sample_status(video_dir, sample_status)
+      raise
     write_sample_status(video_dir, sample_status)
     if sample_status["status"] == "success":
       stats_summary["success"] += 1
@@ -667,78 +684,98 @@ def process_ytdlp_items(
   skip_asr: bool,
 ) -> dict[str, int]:
   summary = {"success": 0, "failed": 0, "skipped": 0}
-  for item in items:
-    account_folder = sanitize_folder_name(item.uploader or item.extractor or "external")
-    media_id = sanitize_folder_name(item.media_id)
-    video_dir = output_base / account_folder / media_id
-    video_dir.mkdir(parents=True, exist_ok=True)
-    audio_path = video_dir / "audio.mp3"
+  temp_roots = {item.temporary_root for item in items}
+  try:
+    for item in items:
+      account_folder = sanitize_folder_name(item.uploader or item.extractor or "external")
+      media_id = sanitize_folder_name(item.media_id)
+      video_dir = output_base / account_folder / media_id
+      video_dir.mkdir(parents=True, exist_ok=True)
+      audio_path = video_dir / "audio.mp3"
 
-    if is_completed_video_dir(video_dir):
-      logger.info(f"跳过已完成外部作品: {media_id}")
-      summary["skipped"] += 1
-      continue
+      if is_completed_video_dir(video_dir):
+        logger.info(f"跳过已完成外部作品: {media_id}")
+        summary["skipped"] += 1
+        continue
 
-    sample_status = {
-      "video_id": media_id,
-      "status": "metadata_only",
-      "metadata": True,
-      "media_downloaded": False,
-      "audio_ready": False,
-      "transcript_ready": False,
-      "source_path": f"yt-dlp:{item.extractor}",
-      "notes": [],
-    }
-    write_sample_status(video_dir, sample_status)
-
-    try:
-      if item.audio_path.suffix.lower() == ".mp3":
-        shutil.copy2(item.audio_path, audio_path)
-      else:
-        cmd_ffmpeg = [
-          "ffmpeg", "-y", "-i", str(item.audio_path),
-          "-vn", "-acodec", "libmp3lame", "-q:a", "2",
-          str(audio_path)
-        ]
-        subprocess.run(cmd_ffmpeg, check=True, capture_output=True)
-      sample_status["media_downloaded"] = True
-      sample_status["audio_ready"] = True
-    except Exception as e:
-      sample_status["status"] = "download_failed"
-      sample_status["notes"].append(f"yt-dlp output normalize failed: {e}")
+      sample_status = {
+        "video_id": media_id,
+        "status": "metadata_only",
+        "metadata": True,
+        "media_downloaded": False,
+        "audio_ready": False,
+        "transcript_ready": False,
+        "source_path": f"yt-dlp:{item.extractor}",
+        "notes": [],
+      }
       write_sample_status(video_dir, sample_status)
-      logger.error(f"外部作品归一化失败 {media_id}: {e}")
-      summary["failed"] += 1
-      continue
 
-    meta_text = (
-      f"## 视频信息\n"
-      f"标题：{item.title}\n"
-      f"作者：{item.uploader}\n"
-      f"视频ID：{item.media_id}\n"
-      f"来源：{item.webpage_url}\n\n"
-      f"## 数据\n"
-      f"播放：{item.info.get('view_count', 0)}\n"
-      f"点赞：{item.info.get('like_count', 0)}\n"
-      f"评论数：{item.info.get('comment_count', 0)}\n\n"
-    )
-    (video_dir / "meta.md").write_text(meta_text, encoding="utf-8")
-    (video_dir / "source.info.json").write_text(
-      json.dumps(item.info, ensure_ascii=False, indent=2) + "\n",
-      encoding="utf-8",
-    )
-    finalize_transcript(
-      audio_path,
-      video_dir,
-      sample_status,
-      skip_asr=skip_asr,
-      whisper_path=whisper_path,
-    )
-    write_sample_status(video_dir, sample_status)
-    if sample_status["status"] == "success":
-      summary["success"] += 1
-    else:
-      summary["failed"] += 1
+      try:
+        if item.audio_path.suffix.lower() == ".mp3":
+          shutil.copy2(item.audio_path, audio_path)
+        else:
+          cmd_ffmpeg = [
+            "ffmpeg", "-y", "-i", str(item.audio_path),
+            "-vn", "-acodec", "libmp3lame", "-q:a", "2",
+            str(audio_path)
+          ]
+          subprocess.run(cmd_ffmpeg, check=True, capture_output=True)
+        sample_status["media_downloaded"] = True
+        sample_status["audio_ready"] = True
+      except KeyboardInterrupt:
+        sample_status["status"] = "interrupted"
+        sample_status["notes"].append("interrupted during yt-dlp normalization")
+        write_sample_status(video_dir, sample_status)
+        raise
+      except Exception as e:
+        sample_status["status"] = "download_failed"
+        sample_status["notes"].append(f"yt-dlp output normalize failed: {e}")
+        write_sample_status(video_dir, sample_status)
+        logger.error(f"外部作品归一化失败 {media_id}: {e}")
+        summary["failed"] += 1
+        continue
+
+      meta_text = (
+        f"## 视频信息\n"
+        f"标题：{item.title}\n"
+        f"作者：{item.uploader}\n"
+        f"视频ID：{item.media_id}\n"
+        f"来源：{item.webpage_url}\n\n"
+        f"## 数据\n"
+        f"播放：{item.info.get('view_count', 0)}\n"
+        f"点赞：{item.info.get('like_count', 0)}\n"
+        f"评论数：{item.info.get('comment_count', 0)}\n\n"
+      )
+      (video_dir / "meta.md").write_text(meta_text, encoding="utf-8")
+      (video_dir / "source.info.json").write_text(
+        json.dumps(item.info, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+      )
+      try:
+        finalize_transcript(
+          audio_path,
+          video_dir,
+          sample_status,
+          skip_asr=skip_asr,
+          whisper_path=whisper_path,
+        )
+      except KeyboardInterrupt:
+        sample_status["status"] = "interrupted"
+        sample_status["notes"].append("interrupted during asr")
+        write_sample_status(video_dir, sample_status)
+        raise
+      write_sample_status(video_dir, sample_status)
+      if sample_status["status"] == "success":
+        summary["success"] += 1
+      else:
+        summary["failed"] += 1
+  finally:
+    for root in temp_roots:
+      try:
+        if root.exists():
+          shutil.rmtree(root)
+      except OSError as exc:
+        logger.warning("清理 yt-dlp 临时媒体目录失败 %s: %s", root, exc)
   return summary
 
 
@@ -826,17 +863,36 @@ def main():
     args.backend == "auto" and not looks_like_douyin_url(effective_url)
   ):
     try:
+      if args.list_only:
+        ytdlp_probe_items = probe_ytdlp_items(
+          url=args.url,
+          cookie_str=cookie_str,
+          use_douyin_cookie=looks_like_douyin_url(effective_url),
+        )
+        print(json.dumps({
+          "count": len(ytdlp_probe_items),
+          "ids": [item.media_id for item in ytdlp_probe_items],
+          "items": [
+            {
+              "id": item.media_id,
+              "title": item.title,
+              "uploader": item.uploader,
+              "extractor": item.extractor,
+              "url": item.webpage_url,
+            }
+            for item in ytdlp_probe_items
+          ],
+        }, ensure_ascii=False, indent=2))
+        return
+
       ytdlp_items = run_ytdlp_audio(
         url=args.url,
         cookie_str=cookie_str,
         use_douyin_cookie=looks_like_douyin_url(effective_url),
       )
-      if args.list_only:
-        print(json.dumps({
-          "count": len(ytdlp_items),
-          "ids": [item.media_id for item in ytdlp_items],
-        }, ensure_ascii=False, indent=2))
-        return
+      if not ytdlp_items:
+        logger.error("yt-dlp 未返回任何可归一化的媒体文件。")
+        sys.exit(1)
       summary = process_ytdlp_items(
         ytdlp_items,
         output_base=output_base,
@@ -905,12 +961,12 @@ def main():
         )
         return
       except ExternalBackendError as exc:
-        if args.backend == "f2" or args.all:
+        if args.backend == "f2" or count_limit is None:
           logger.error(f"F2 后端失败: {exc}")
           sys.exit(1)
         logger.warning(f"F2 后端不可用，回退 legacy 逻辑: {exc}")
 
-    if args.all:
+    if args.all or args.count <= 0:
       logger.error("legacy 后端不支持 --all；请使用 --backend f2 或修复 F2 环境。")
       sys.exit(1)
     

@@ -16,7 +16,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -50,6 +49,16 @@ class YtDlpItem:
   webpage_url: str
   audio_path: Path
   info: dict[str, Any]
+  temporary_root: Path
+
+
+@dataclass
+class YtDlpProbeItem:
+  media_id: str
+  title: str
+  uploader: str
+  extractor: str
+  webpage_url: str
 
 
 def ensure_external_dirs() -> None:
@@ -393,6 +402,62 @@ def run_ytdlp_audio(
     cleanup_paths(cleanup_targets)
 
 
+def probe_ytdlp_items(
+  *,
+  url: str,
+  cookie_str: str = "",
+  use_douyin_cookie: bool = False,
+) -> list[YtDlpProbeItem]:
+  yt_dlp_bin = shutil.which("yt-dlp")
+  if not yt_dlp_bin:
+    raise ExternalBackendError("未检测到 yt-dlp，请先安装 yt-dlp 或改用 legacy 后端。")
+
+  ensure_external_dirs()
+  cookie_path = RUNTIME_DIR / f"yt-dlp-probe-cookies-{os.getpid()}.txt"
+  cleanup_targets = [cookie_path]
+  cmd = [
+    yt_dlp_bin,
+    "--ignore-errors",
+    "--no-progress",
+    "--flat-playlist",
+    "--dump-json",
+    url,
+  ]
+  if cookie_str and use_douyin_cookie:
+    write_netscape_cookie_file(cookie_str, cookie_path)
+    cmd[1:1] = ["--cookies", str(cookie_path)]
+
+  try:
+    result = run_supervised(cmd, cookie_str=cookie_str)
+    if result.returncode != 0:
+      details = result.stderr.strip() or result.stdout.strip()
+      raise ExternalBackendError(f"yt-dlp 列表探测失败: {details}")
+    items: list[YtDlpProbeItem] = []
+    for line in result.stdout.splitlines():
+      line = line.strip()
+      if not line:
+        continue
+      try:
+        info = json.loads(line)
+      except json.JSONDecodeError:
+        continue
+      media_id = str(info.get("id") or info.get("url") or "").strip()
+      if not media_id:
+        continue
+      items.append(
+        YtDlpProbeItem(
+          media_id=media_id,
+          title=str(info.get("title") or media_id),
+          uploader=str(info.get("uploader") or info.get("channel") or ""),
+          extractor=str(info.get("extractor_key") or info.get("extractor") or ""),
+          webpage_url=str(info.get("webpage_url") or info.get("url") or ""),
+        )
+      )
+    return items
+  finally:
+    cleanup_paths(cleanup_targets)
+
+
 def scan_ytdlp_outputs(root: Path) -> list[YtDlpItem]:
   items: list[YtDlpItem] = []
   if not root.exists():
@@ -431,6 +496,7 @@ def scan_ytdlp_outputs(root: Path) -> list[YtDlpItem]:
         webpage_url=webpage_url,
         audio_path=audio_path,
         info=info,
+        temporary_root=root,
       )
     )
 
