@@ -12,6 +12,7 @@ import re
 import shutil
 import sys
 import subprocess
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,16 @@ SESSION_COOKIE_NAMES = {
   "passport_auth_status",
   "passport_auth_status_ss",
 }
+
+
+def cookie_header_has_login(cookie_str: str) -> bool:
+  cookie_names = set(parse_cookie_header(cookie_str).keys())
+  return bool(cookie_names & SESSION_COOKIE_NAMES)
+
+
+def playwright_cookies_have_login(cookies: list[dict[str, Any]]) -> bool:
+  cookie_names = {str(cookie.get("name") or "") for cookie in cookies or []}
+  return bool(cookie_names & SESSION_COOKIE_NAMES)
 
 def load_cookie(cookie_str: str = "", cookie_file: str = "") -> str:
   """
@@ -465,8 +476,7 @@ def persist_browser_auth_if_logged_in(context) -> None:
 
   if not cookies:
     return
-  cookie_names = {str(cookie.get("name") or "") for cookie in cookies}
-  if not (cookie_names & SESSION_COOKIE_NAMES):
+  if not playwright_cookies_have_login(cookies):
     logger.warning("浏览器上下文未检测到登录态 Cookie，不覆盖 cookie.txt 或 .auth/state.json。")
     return
 
@@ -528,6 +538,7 @@ def scrape_user_posts_via_browser_fallback(
   max_scrolls: int,
   idle_rounds: int,
   wait_timeout_seconds: int,
+  require_login: bool,
 ) -> tuple[list[dict[str, Any]], str, list[str]]:
   try:
     from playwright.sync_api import sync_playwright
@@ -543,6 +554,8 @@ def scrape_user_posts_via_browser_fallback(
   id_seen: set[str] = set()
   nickname = ""
   post_api_pages = 0
+  post_api_login_tip_seen = False
+  post_api_verify_seen = False
 
   def merge_ids(new_ids: list[str]) -> None:
     for aweme_id in new_ids:
@@ -555,28 +568,42 @@ def scrape_user_posts_via_browser_fallback(
   )
 
   with sync_playwright() as p:
-    browser = p.chromium.launch(
-      headless=headless,
-      args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"],
-    )
-    if state_file.is_file():
-      context = browser.new_context(
-        storage_state=str(state_file),
-        user_agent=DEFAULT_USER_AGENT,
-        locale="zh-CN",
-        viewport={"width": 1600, "height": 900},
+    auth_dir = Path(".auth")
+    auth_dir.mkdir(exist_ok=True)
+    if headless:
+      browser = p.chromium.launch(
+        headless=True,
+        args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"],
       )
+      if state_file.is_file():
+        context = browser.new_context(
+          storage_state=str(state_file),
+          user_agent=DEFAULT_USER_AGENT,
+          locale="zh-CN",
+          viewport={"width": 1600, "height": 900},
+        )
+      else:
+        context = browser.new_context(
+          user_agent=DEFAULT_USER_AGENT,
+          locale="zh-CN",
+          viewport={"width": 1600, "height": 900},
+        )
+      close_browser = browser.close
     else:
-      context = browser.new_context(
+      context = p.chromium.launch_persistent_context(
+        user_data_dir=str(auth_dir.resolve()),
+        headless=False,
         user_agent=DEFAULT_USER_AGENT,
         locale="zh-CN",
         viewport={"width": 1600, "height": 900},
+        args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"],
       )
+      close_browser = lambda: None
     add_cookie_header_to_context(context, cookie_str)
     page = context.new_page()
 
     def handle_response(response) -> None:
-      nonlocal post_api_pages
+      nonlocal post_api_pages, post_api_login_tip_seen, post_api_verify_seen
       if "/aweme/v1/web/aweme/post/" not in (response.url or ""):
         return
       try:
@@ -589,6 +616,12 @@ def scrape_user_posts_via_browser_fallback(
       if not isinstance(page_items, list):
         return
       post_api_pages += 1
+      if isinstance(data.get("not_login_module"), dict) and (
+        (data.get("not_login_module") or {}).get("guide_login_tip_exist")
+      ):
+        post_api_login_tip_seen = True
+      if data.get("verify_ticket"):
+        post_api_verify_seen = True
       extracted_ids: list[str] = []
       for item in page_items:
         if not isinstance(item, dict):
@@ -624,14 +657,44 @@ def scrape_user_posts_via_browser_fallback(
     except Exception:
       pass
 
+    if require_login and headless:
+      logger.warning("当前 Cookie 疑似游客态，但浏览器兜底运行在 headless 模式，无法人工登录/验证。")
+
     if not headless:
-      logger.warning("浏览器窗口已打开；如出现登录弹窗或验证码，请先处理，程序会等待主页数据出现。")
+      logger.warning("浏览器窗口已打开；如出现登录弹窗或验证码，请先处理，程序会等待登录态和主页数据出现。")
+      login_wait_deadline = time.monotonic() + max(30, wait_timeout_seconds)
+      last_login_log = 0.0
+      while require_login and time.monotonic() < login_wait_deadline:
+        try:
+          current_cookies = context.cookies("https://www.douyin.com")
+        except Exception:
+          current_cookies = []
+        if playwright_cookies_have_login(current_cookies):
+          logger.warning("检测到登录态 Cookie，重新加载目标主页并开始采集。")
+          persist_browser_auth_if_logged_in(context)
+          try:
+            page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+          except Exception as exc:
+            logger.warning(f"登录后重新加载目标主页异常，继续采集: {exc}")
+          break
+        now = time.monotonic()
+        if now - last_login_log >= 10:
+          logger.warning("仍未检测到登录态 Cookie；请在浏览器中完成扫码登录/验证码。")
+          last_login_log = now
+        page.wait_for_timeout(1000)
+
       try:
         warmup_deadline = page.evaluate("Date.now()") + min(wait_timeout_seconds, 90) * 1000
         while page.evaluate("Date.now()") < warmup_deadline:
           merge_ids(extract_aweme_ids_from_page(page))
-          if post_aweme_by_id or id_order:
+          if post_aweme_by_id or (id_order and not require_login):
             break
+          if id_order and require_login:
+            try:
+              if playwright_cookies_have_login(context.cookies("https://www.douyin.com")):
+                break
+            except Exception:
+              pass
           page.wait_for_timeout(1000)
       except Exception:
         pass
@@ -669,7 +732,7 @@ def scrape_user_posts_via_browser_fallback(
       pass
     persist_browser_auth_if_logged_in(context)
     context.close()
-    browser.close()
+    close_browser()
 
   browser_items = [
     post_aweme_by_id[aweme_id]
@@ -681,10 +744,12 @@ def scrape_user_posts_via_browser_fallback(
       browser_items.append(item)
 
   logger.warning(
-    "浏览器兜底采集结束：主页接口页数=%s，ID=%s，完整元数据=%s",
+    "浏览器兜底采集结束：主页接口页数=%s，ID=%s，完整元数据=%s，login_tip=%s，verify=%s",
     post_api_pages,
     len(id_order),
     len(browser_items),
+    post_api_login_tip_seen,
+    post_api_verify_seen,
   )
   return browser_items, nickname, id_order
 
@@ -1331,8 +1396,14 @@ def main():
 
         source_path = "f2"
         diagnostics = list(f2_result.page_diagnostics)
+        requires_browser_login = (
+          any(item.get("login_tip") for item in diagnostics)
+          or not cookie_header_has_login(cookie_str)
+        )
         if any(item.get("login_tip") for item in diagnostics):
           logger.warning("抖音接口返回登录提示：当前 Cookie 可能是游客态或登录态不足。")
+        if cookie_str and not cookie_header_has_login(cookie_str):
+          logger.warning("本地 cookie.txt 未发现 sessionid/sessionid_ss/sid_guard 等登录态 Cookie。")
         incomplete_reason = collection_incomplete_reason(
           len(aweme_list),
           expected_count=f2_result.expected_count,
@@ -1352,6 +1423,7 @@ def main():
               max_scrolls=args.browser_max_scrolls,
               idle_rounds=args.browser_idle_rounds,
               wait_timeout_seconds=args.browser_wait_timeout,
+              require_login=requires_browser_login,
             )
             if browser_nickname:
               nickname = args.account_name or browser_nickname
