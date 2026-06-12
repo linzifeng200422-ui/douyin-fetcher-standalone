@@ -34,6 +34,23 @@ async def main():
         print("\n[提示] 请在弹出的浏览器窗口中正常浏览，或直接扫码登录（若需要）。")
         print("[提示] 已经实现【实时保存】，你无需关闭浏览器，直接扫码，脚本会自动更新 cookie.txt 并执行下载！")
         
+        # 定义提取并保存的异步函数
+        async def save_cookies_and_state():
+            try:
+                # 仅限过滤抖音核心域名的 Cookie
+                cookies = await context.cookies("https://www.douyin.com")
+                if cookies:
+                    cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+                    cookie_file = Path("cookie.txt")
+                    cookie_file.write_text(cookie_str, encoding="utf-8")
+                    
+                    # 导出完整的存储状态（包含 cookies, localStorage 等）
+                    state_file = auth_dir / "state.json"
+                    await context.storage_state(path=str(state_file))
+                    print(f"✓ 实时同步 {len(cookies)} 个抖音 Cookie 到 cookie.txt，存储状态已同步到 {state_file.name}...", flush=True)
+            except Exception as ex:
+                print(f"同步 Cookie/状态时发生异常: {ex}", flush=True)
+
         # 循环等待，直到浏览器被关闭，期间每 2 秒自动保存一次 Cookie
         try:
             while True:
@@ -41,17 +58,14 @@ async def main():
                 if len(context.pages) == 0:
                     break
                 
-                # 实时提取并保存 Cookie
-                cookies = await context.cookies()
-                if cookies:
-                    cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-                    cookie_file = Path("cookie.txt")
-                    cookie_file.write_text(cookie_str, encoding="utf-8")
-                    print(f"✓ 实时同步 {len(cookies)} 个 Cookie 到 cookie.txt...", flush=True)
-
+                await save_cookies_and_state()
                 await asyncio.sleep(2)
         except Exception as e:
             print(f"提取过程发生异常: {e}")
+        
+        # 退出循环后（如浏览器被关闭时），在 context 关闭前最后强刷保存一次，防止漏存最后一刻的登录态
+        print("正在进行最后一刻的数据同步...", flush=True)
+        await save_cookies_and_state()
             
         await context.close()
 

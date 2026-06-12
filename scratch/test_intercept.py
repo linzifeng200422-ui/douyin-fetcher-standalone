@@ -8,10 +8,12 @@ async def main():
         auth_dir = Path(".auth")
         context = await p.chromium.launch_persistent_context(
             user_data_dir=str(auth_dir.resolve()),
-            headless=True,
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            headless=False, # 使用 headed 模式以绕过 headless 防爬检测
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1440, "height": 900},
+            args=["--disable-blink-features=AutomationControlled"]
         )
-        page = await context.new_page()
+        page = context.pages[0] if context.pages else await context.new_page()
         
         print("Navigating to user page...")
         try:
@@ -24,7 +26,8 @@ async def main():
             response = await response_info.value
             print(f"✓ Intercepted API: {response.url[:80]}...")
             body = await response.body()
-            print(f"Body start: {body[:100]}")
+            print(f"Body length: {len(body)}")
+            print(f"Body start: {body[:200]}")
             json_data = json.loads(body.decode("utf-8"))
             print(f"✓ Parsed JSON successfully! Videos count: {len(json_data.get('aweme_list', []))}")
             if json_data.get('aweme_list'):

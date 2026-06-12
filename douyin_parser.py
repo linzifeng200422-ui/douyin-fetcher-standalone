@@ -23,6 +23,9 @@ logger = logging.getLogger("douyin-fetcher-standalone")
 PUBLIC_API_BASE_URL = os.getenv("DOUYIN_API_BASE_URL", "https://api.douyin.wtf")
 LOCAL_API_BASE_URL = os.getenv("LOCAL_DOUYIN_API_BASE_URL", "http://127.0.0.1:8080")
 
+# 统一全局高仿 User-Agent，避免 UA 不匹配风控
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
 def load_cookie(cookie_str: str = "", cookie_file: str = "") -> str:
   """
   获取并解析 Cookie。支持直接传参或读取本地文本文件。
@@ -50,7 +53,7 @@ def fetch_api_json(base_url: str, endpoint: str, params: dict, source_label: str
 
   cmd = [
     "curl", "-s", "-L",
-    "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "-H", f"User-Agent: {DEFAULT_USER_AGENT}",
     url
   ]
   if cookie:
@@ -103,13 +106,179 @@ def fetch_user_posts(sec_user_id: str, count: int, cookie: str = "") -> dict | N
 
   return None
 
+
+def fetch_single_video_details(video_id: str, cookie_str: str = "") -> dict | None:
+  """
+  向 iesdouyin 发送请求，抓取单视频 HTML 页面，并从 window._ROUTER_DATA 中解析还原出视频数据。
+  """
+  ies_url = f"https://www.iesdouyin.com/share/video/{video_id}"
+  cmd_fetch = [
+    "curl", "-s", "-L",
+    "-H", f"User-Agent: {DEFAULT_USER_AGENT}",
+    ies_url
+  ]
+  if cookie_str:
+    cmd_fetch += ["-H", f"Cookie: {cookie_str}"]
+
+  try:
+    result = subprocess.run(cmd_fetch, capture_output=True, text=True, encoding="utf-8")
+    pattern = re.compile(pattern=r"window\._ROUTER_DATA\s*=\s*(.*?)</script>", flags=re.DOTALL)
+    find_res = pattern.search(result.stdout)
+    if not find_res:
+      logger.error(f"在视频 {video_id} 网页源码中未匹配到 window._ROUTER_DATA，可能已被删除或风控限制。")
+      return None
+
+    json_str = find_res.group(1).strip()
+    if json_str.endswith(';'):
+      json_str = json_str[:-1]
+
+    json_data = json.loads(json_str)
+    loader_data = json_data.get("loaderData", {})
+    
+    VIDEO_ID_PAGE_KEY = "video_(id)/page"
+    NOTE_ID_PAGE_KEY = "note_(id)/page"
+
+    original_video_info = None
+    if VIDEO_ID_PAGE_KEY in loader_data:
+      original_video_info = loader_data[VIDEO_ID_PAGE_KEY].get("videoInfoRes")
+    elif NOTE_ID_PAGE_KEY in loader_data:
+      original_video_info = loader_data[NOTE_ID_PAGE_KEY].get("videoInfoRes")
+
+    if not original_video_info or not original_video_info.get("item_list"):
+      logger.error(f"视频 {video_id} 解析成功，但未获取到作品信息。")
+      return None
+
+    return original_video_info["item_list"][0]
+  except Exception as e:
+    logger.error(f"解析视频 {video_id} 网页数据还原失败: {e}")
+    return None
+
+
+def scrape_user_videos_via_browser(sec_user_id: str, count: int) -> tuple[list[str], str]:
+  """
+  使用 Playwright 本地浏览器访问博主主页，通过加载 state.json 状态恢复登录态，
+  然后向下滚动以动态加载并收集足够数量 of 视频 ID，同时获取博主昵称。
+  返回: (video_ids_list, nickname)
+  """
+  try:
+    from playwright.sync_api import sync_playwright
+  except ImportError:
+    logger.error("未检测到 playwright 库。请先安装: pip install playwright && playwright install chromium")
+    return [], "未命名账号"
+
+  video_ids = []
+  nickname = "未命名账号"
+  user_page_url = f"https://www.douyin.com/user/{sec_user_id}"
+  
+  logger.info(f"启动 Playwright 本地浏览器抓取主页: {user_page_url}")
+  
+  state_file = Path(".auth/state.json")
+  
+  with sync_playwright() as p:
+    # 启动 Chromium
+    browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+    
+    # 尝试加载登录态 state.json 以免锁 context 目录
+    if state_file.is_file():
+      logger.info(f"正在读取 {state_file.name} 恢复登录态...")
+      context = browser.new_context(
+        storage_state=str(state_file),
+        user_agent=DEFAULT_USER_AGENT,
+        viewport={"width": 1440, "height": 900}
+      )
+    else:
+      logger.warning("未检测到登录状态 state.json 文件，将以游客身份访问主页。")
+      context = browser.new_context(
+        user_agent=DEFAULT_USER_AGENT,
+        viewport={"width": 1440, "height": 900}
+      )
+      
+    page = context.new_page()
+    
+    try:
+      page.goto(user_page_url, wait_until="domcontentloaded", timeout=45000)
+    except Exception as e:
+      logger.warning(f"页面加载发生超时或异常，尝试继续解析: {e}")
+      
+    # 获取博主昵称
+    try:
+      title = page.title()
+      if "的主页" in title:
+        nickname = title.split("的主页")[0].strip()
+      elif "的个人主页" in title:
+        nickname = title.split("的个人主页")[0].strip()
+      else:
+        nickname = title.split(" - ")[0].strip()
+      logger.info(f"解析到博主昵称: {nickname}")
+    except Exception as ne:
+      logger.warning(f"获取博主昵称异常: {ne}")
+      
+    # 向下滚动以动态加载视频
+    last_count = 0
+    no_change_scrolls = 0
+    max_scrolls = 20 # 最多滚动 20 次防死循环
+    
+    for scroll in range(max_scrolls):
+      # 获取当前所有视频 a 标签的 href
+      try:
+        locators = page.locator("a[href*='/video/']")
+        elem_count = locators.count()
+      except Exception:
+        elem_count = 0
+        
+      # 提取当前所有存在的视频 ID
+      current_ids = []
+      for idx in range(elem_count):
+        try:
+          href = locators.nth(idx).get_attribute("href")
+          if href:
+            match = re.search(r'video/(\d+)', href)
+            if match:
+              current_ids.append(match.group(1))
+        except Exception:
+          continue
+          
+      # 去重保留顺序
+      for vid in current_ids:
+        if vid not in video_ids:
+          video_ids.append(vid)
+          
+      logger.info(f"第 {scroll+1} 次滚动: 当前已获取到 {len(video_ids)} 个视频 ID (目标: {count})")
+      
+      if len(video_ids) >= count:
+        break
+        
+      # 判断是否已经无法滚动加载更多
+      if len(video_ids) == last_count:
+        no_change_scrolls += 1
+        if no_change_scrolls >= 4:
+          logger.info("连续多次滚动视频数量无增长，判定已触底。")
+          break
+      else:
+        no_change_scrolls = 0
+        
+      last_count = len(video_ids)
+      
+      # 模拟向下滚动滚动条
+      try:
+        page.evaluate("window.scrollBy(0, 1000)")
+        page.wait_for_timeout(1500) # 等待 1.5 秒加载
+      except Exception:
+        break
+        
+    context.close()
+    browser.close()
+    
+  # 返回前截断到指定数量
+  return video_ids[:count], nickname
+
 def download_file(url: str, dest_path: Path, cookie: str = ""):
   """
   使用系统 curl 工具下载媒体资源原档。
   """
   cmd = [
     "curl", "-s", "-L",
-    "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "-H", f"User-Agent: {DEFAULT_USER_AGENT}",
     "-H", "Referer: https://www.douyin.com/",
     "-o", str(dest_path),
     url
@@ -194,6 +363,13 @@ def main():
   args = parser.parse_args()
 
   cookie_str = load_cookie(args.cookie, args.cookie_file)
+  if not cookie_str and not args.cookie and not args.cookie_file:
+    # 默认自动加载当前目录下的 cookie.txt
+    default_cookie_path = Path("cookie.txt")
+    if default_cookie_path.is_file():
+      logger.info("检测到本地 cookie.txt，正在自动加载登录态...")
+      cookie_str = load_cookie(cookie_file="cookie.txt")
+
   output_base = Path(args.output_dir)
   output_base.mkdir(parents=True, exist_ok=True)
 
@@ -203,7 +379,7 @@ def main():
   logger.info("模拟跳转以探查链接类型，识别主页与单视频...")
   cmd_redirect = [
     "curl", "-s", "-I", "-L",
-    "-H", "User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) EdgiOS/121.0.2277.107 Version/17.0 Mobile/15E148 Safari/604.1",
+    "-H", f"User-Agent: {DEFAULT_USER_AGENT}",
     args.url
   ]
   if cookie_str:
@@ -235,11 +411,15 @@ def main():
   if sec_user_id:
     # 情况 A：输入为主页链接
     logger.info(f"检测到主页分享链接 (sec_uid: {sec_user_id})")
-    logger.info(f"正在拉取该博主最近的 {args.count} 个作品列表...")
+    
+    post_vids = []
+    # 1. 尝试使用公共/本地 API 接口拉取主页作品
+    logger.info(f"正在通过 API 拉取该博主最近的 {args.count} 个作品列表...")
     res_posts = fetch_user_posts(sec_user_id, args.count, cookie_str)
     
     post_data = res_posts.get("data", {}) if res_posts else {}
     if post_data and post_data.get("aweme_list"):
+      logger.info("✓ 通过 API 成功拉取到主页作品列表")
       aweme_list = post_data["aweme_list"]
       for aweme in aweme_list:
         author = aweme.get("author", {})
@@ -247,68 +427,52 @@ def main():
           nickname = author.get("nickname")
           break
     else:
-      logger.error("拉取博主主页作品失败。若主页被反爬，请尝试传入最新的 Cookie 或提供单视频链接。")
-      sys.exit(1)
+      # 2. 如果 API 被拦截或失败，使用 Playwright 浏览器 DOM 提取器兜底
+      logger.warning("API 拉取主页失败，正在启动本地浏览器 DOM 提取器兜底...")
+      browser_vids, scraped_nickname = scrape_user_videos_via_browser(sec_user_id, args.count)
+      if scraped_nickname and scraped_nickname != "未命名账号":
+        nickname = scraped_nickname
+        
+      if browser_vids:
+        logger.info(f"✓ 通过本地浏览器成功提取到 {len(browser_vids)} 个视频 ID。开始逐个获取视频详情...")
+        post_vids = browser_vids
+      else:
+        logger.error("本地浏览器提取博主视频 ID 失败，结束处理。")
+        sys.exit(1)
+        
+    # 3. 对于从浏览器中提取的视频 ID，通过本地 HTML 还原数据结构
+    if post_vids:
+      for vid in post_vids:
+        logger.info(f"正在获取视频详情: {vid}")
+        video_data = fetch_single_video_details(vid, cookie_str)
+        if video_data:
+          aweme_list.append(video_data)
+        else:
+          logger.warning(f"视频 {vid} 详情解析失败，已跳过")
   else:
     # 情况 B：输入为单视频链接
     logger.info("按单视频分享链接进行本地免 Cookie HTML 解密...")
-    try:
-      video_id_match = re.search(r'video/(\d+)', final_url)
-      if not video_id_match:
-        video_id_match = re.search(r'/(\d+)(?:\?|$)', final_url)
+    video_id_match = re.search(r'video/(\d+)', final_url)
+    if not video_id_match:
+      video_id_match = re.search(r'/(\d+)(?:\?|$)', final_url)
 
-      if not video_id_match:
-        logger.error(f"无法从最终重定向链接中提取出视频数字 ID: {final_url}")
-        sys.exit(1)
+    if not video_id_match:
+      logger.error(f"无法从最终重定向链接中提取出视频数字 ID: {final_url}")
+      sys.exit(1)
 
-      video_id = video_id_match.group(1)
-      logger.info(f"成功提取视频 ID: {video_id}。开始向 iesdouyin 发送请求...")
-
-      ies_url = f"https://www.iesdouyin.com/share/video/{video_id}"
-      cmd_fetch = [
-        "curl", "-s", "-L",
-        "-H", "User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) EdgiOS/121.0.2277.107 Version/17.0 Mobile/15E148 Safari/604.1",
-        ies_url
-      ]
-      if cookie_str:
-        cmd_fetch += ["-H", f"Cookie: {cookie_str}"]
-
-      result = subprocess.run(cmd_fetch, capture_output=True, text=True, encoding="utf-8")
-      pattern = re.compile(pattern=r"window\._ROUTER_DATA\s*=\s*(.*?)</script>", flags=re.DOTALL)
-      find_res = pattern.search(result.stdout)
-      if not find_res:
-        logger.error("在网页源码中未匹配到 window._ROUTER_DATA，视频页面可能已被删除或风控限制。")
-        sys.exit(1)
-
-      json_str = find_res.group(1).strip()
-      if json_str.endswith(';'):
-        json_str = json_str[:-1]
-
-      json_data = json.loads(json_str)
-      loader_data = json_data.get("loaderData", {})
-      
-      VIDEO_ID_PAGE_KEY = "video_(id)/page"
-      NOTE_ID_PAGE_KEY = "note_(id)/page"
-
-      original_video_info = None
-      if VIDEO_ID_PAGE_KEY in loader_data:
-        original_video_info = loader_data[VIDEO_ID_PAGE_KEY].get("videoInfoRes")
-      elif NOTE_ID_PAGE_KEY in loader_data:
-        original_video_info = loader_data[NOTE_ID_PAGE_KEY].get("videoInfoRes")
-
-      if not original_video_info or not original_video_info.get("item_list"):
-        logger.error("网页解析成功，但未在 window._ROUTER_DATA 中获取到作品信息。")
-        sys.exit(1)
-
-      data = original_video_info["item_list"][0]
-      nickname = data.get("author", {}).get("nickname") or data.get("nickname") or "未命名账号"
-      aweme_list = [data]
-    except Exception as e:
-      logger.error(f"解析网页数据还原单视频失败: {e}")
+    video_id = video_id_match.group(1)
+    logger.info(f"成功提取视频 ID: {video_id}。开始解析详情...")
+    
+    video_data = fetch_single_video_details(video_id, cookie_str)
+    if video_data:
+      aweme_list = [video_data]
+      nickname = video_data.get("author", {}).get("nickname") or video_data.get("nickname") or "未命名账号"
+    else:
+      logger.error("解析单视频网页数据失败，结束处理。")
       sys.exit(1)
 
   if not aweme_list:
-    logger.error("获取到的视频列表为空，结束处理。")
+    logger.error("最终获取到的可用视频列表为空，结束处理。")
     sys.exit(1)
 
   # 规范化博主命名的文件夹名称，防路径截断安全风险

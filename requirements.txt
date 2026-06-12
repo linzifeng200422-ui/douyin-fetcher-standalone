@@ -3,3 +3,6 @@
 
 # 仅在需要使用本地 Whisper ASR 语音识别服务时安装此包：
 openai-whisper
+
+# 本地浏览器主页解析和登录态捕获依赖：
+playwright
