@@ -46,6 +46,14 @@ class F2FetchResult:
 
 
 @dataclass
+class F2DetailResult:
+  aweme_list: list[dict[str, Any]]
+  errors: list[dict[str, str]]
+  requested: int
+  source: str = "f2-detail"
+
+
+@dataclass
 class YtDlpItem:
   media_id: str
   title: str
@@ -342,6 +350,93 @@ asyncio.run(main())
 '''
 
 
+F2_DETAIL_FETCHER_CODE = r'''
+import asyncio
+import json
+import sys
+import traceback
+from pathlib import Path
+
+from f2.apps.douyin.handler import DouyinHandler
+
+
+async def main():
+    config_path = Path(sys.argv[1])
+    output_path = Path(sys.argv[2])
+    cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    cookie = cfg.get("cookie", "")
+    aweme_ids = [str(item) for item in cfg.get("aweme_ids", []) if str(item).strip()]
+    sec_user_id = str(cfg.get("sec_user_id") or "")
+    timeout = int(cfg.get("timeout") or 10)
+    max_retries = int(cfg.get("max_retries") or 3)
+
+    kwargs = {
+        "headers": {
+            "User-Agent": cfg.get("user_agent", ""),
+            "Referer": "https://www.douyin.com/",
+        },
+        "proxies": {"http://": None, "https://": None},
+        "timeout": timeout,
+        "max_retries": max_retries,
+        "cookie": cookie,
+    }
+
+    result = {
+        "ok": True,
+        "requested": len(aweme_ids),
+        "aweme_list": [],
+        "errors": [],
+    }
+    seen = set()
+
+    try:
+        handler = DouyinHandler(kwargs)
+
+        async def _noop_notification(*args, **kwargs):
+            return None
+
+        handler.enable_bark = False
+        handler._send_bark_notification = _noop_notification
+
+        for aweme_id in aweme_ids:
+            if aweme_id in seen:
+                continue
+            seen.add(aweme_id)
+            try:
+                detail = await handler.fetch_one_video(aweme_id)
+                raw = detail._to_raw() if hasattr(detail, "_to_raw") else {}
+                aweme = raw.get("aweme_detail") if isinstance(raw, dict) else None
+                if not isinstance(aweme, dict):
+                    result["errors"].append({"aweme_id": aweme_id, "error": "missing aweme_detail"})
+                    continue
+                author = aweme.get("author") if isinstance(aweme.get("author"), dict) else {}
+                detail_sec_uid = str(author.get("sec_uid") or "")
+                if sec_user_id and detail_sec_uid and detail_sec_uid != sec_user_id:
+                    result["errors"].append({
+                        "aweme_id": aweme_id,
+                        "error": f"author sec_uid mismatch: {detail_sec_uid}",
+                    })
+                    continue
+                result["aweme_list"].append(aweme)
+            except Exception as exc:
+                result["errors"].append({"aweme_id": aweme_id, "error": str(exc)})
+    except Exception as exc:
+        result["ok"] = False
+        result["errors"].append({"aweme_id": "", "error": str(exc)})
+        result["traceback"] = traceback.format_exc()
+
+    output_path.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    if not result["ok"]:
+        sys.exit(2)
+
+
+asyncio.run(main())
+'''
+
+
 def fetch_user_posts_with_f2(
   *,
   sec_user_id: str,
@@ -401,6 +496,69 @@ def fetch_user_posts_with_f2(
       page_diagnostics=[
         item for item in data.get("page_diagnostics", []) if isinstance(item, dict)
       ],
+    )
+  finally:
+    cleanup_paths(cleanup_targets)
+
+
+def fetch_aweme_details_with_f2(
+  *,
+  aweme_ids: list[str],
+  sec_user_id: str,
+  cookie_str: str,
+  user_agent: str,
+  auto_install: bool = True,
+) -> F2DetailResult:
+  clean_ids = []
+  seen = set()
+  for aweme_id in aweme_ids:
+    value = str(aweme_id or "").strip()
+    if not value or value in seen:
+      continue
+    seen.add(value)
+    clean_ids.append(value)
+  if not clean_ids:
+    return F2DetailResult(aweme_list=[], errors=[], requested=0)
+  if not cookie_str:
+    raise ExternalBackendError("F2 detail 回补需要有效 cookie.txt；请先运行 get_cookie.py 扫码登录。")
+
+  ensure_external_dirs()
+  python_bin = ensure_f2_python(auto_install=auto_install)
+
+  input_path = RUNTIME_DIR / f"f2-detail-input-{os.getpid()}.json"
+  output_path = RUNTIME_DIR / f"f2-detail-output-{os.getpid()}.json"
+  script_path = RUNTIME_DIR / f"f2-detail-fetcher-{os.getpid()}.py"
+  cleanup_targets = [input_path, output_path, script_path]
+
+  payload = {
+    "aweme_ids": clean_ids,
+    "sec_user_id": sec_user_id,
+    "cookie": cookie_str,
+    "user_agent": user_agent,
+  }
+
+  try:
+    secure_write_text(input_path, json.dumps(payload, ensure_ascii=False, indent=2))
+    secure_write_text(script_path, F2_DETAIL_FETCHER_CODE)
+    cmd = [str(python_bin), str(script_path), str(input_path), str(output_path)]
+    result = run_supervised(cmd, cookie_str=cookie_str)
+    if result.returncode != 0:
+      details = result.stderr.strip() or result.stdout.strip()
+      raise ExternalBackendError(f"F2 detail 回补失败: {summarize_backend_error(details)}")
+    if not output_path.is_file():
+      raise ExternalBackendError("F2 detail 回补未生成输出。")
+    data = json.loads(output_path.read_text(encoding="utf-8"))
+    if not data.get("ok"):
+      errors = data.get("errors") or [{"error": "unknown error"}]
+      raise ExternalBackendError(f"F2 detail 回补失败: {errors}")
+    return F2DetailResult(
+      aweme_list=[
+        item for item in data.get("aweme_list", []) if isinstance(item, dict)
+      ],
+      errors=[
+        item for item in data.get("errors", []) if isinstance(item, dict)
+      ],
+      requested=int(data.get("requested") or len(clean_ids)),
     )
   finally:
     cleanup_paths(cleanup_targets)

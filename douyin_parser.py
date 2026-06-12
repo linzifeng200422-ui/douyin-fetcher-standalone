@@ -19,6 +19,7 @@ from typing import Any
 from external_backends import (
   ExternalBackendError,
   YtDlpItem,
+  fetch_aweme_details_with_f2,
   fetch_user_posts_with_f2,
   looks_like_douyin_url,
   parse_cookie_header,
@@ -623,6 +624,18 @@ def scrape_user_posts_via_browser_fallback(
     except Exception:
       pass
 
+    if not headless:
+      logger.warning("浏览器窗口已打开；如出现登录弹窗或验证码，请先处理，程序会等待主页数据出现。")
+      try:
+        warmup_deadline = page.evaluate("Date.now()") + min(wait_timeout_seconds, 90) * 1000
+        while page.evaluate("Date.now()") < warmup_deadline:
+          merge_ids(extract_aweme_ids_from_page(page))
+          if post_aweme_by_id or id_order:
+            break
+          page.wait_for_timeout(1000)
+      except Exception:
+        pass
+
     stable_rounds = 0
     for scroll_index in range(max(1, max_scrolls)):
       before = len(id_order) + len(post_aweme_by_id)
@@ -1176,6 +1189,12 @@ def main():
   parser.add_argument("--browser-max-scrolls", type=int, default=240, help="浏览器兜底最大滚动次数")
   parser.add_argument("--browser-idle-rounds", type=int, default=8, help="未知总量时连续无增长多少轮后停止")
   parser.add_argument("--browser-wait-timeout", type=int, default=600, help="浏览器兜底等待验证码/页面恢复的秒数")
+  parser.add_argument(
+    "--detail-fill",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="浏览器只拿到作品 ID 时，用 F2 单作品 detail API 补元数据；默认开启",
+  )
   args = parser.parse_args()
 
   cookie_str = load_cookie(args.cookie, args.cookie_file)
@@ -1345,6 +1364,40 @@ def main():
               "items": len(browser_items),
               "ids": len(browser_ids),
             })
+            if args.detail_fill and browser_ids:
+              existing_ids = {
+                str(item.get("aweme_id") or item.get("video_id") or "").strip()
+                for item in aweme_list
+                if isinstance(item, dict)
+              }
+              missing_detail_ids = [
+                aweme_id for aweme_id in browser_ids
+                if aweme_id and aweme_id not in existing_ids
+              ]
+              if missing_detail_ids:
+                logger.warning(
+                  "浏览器拿到 %s 个缺失元数据的作品 ID，开始用 F2 detail API 回补。",
+                  len(missing_detail_ids),
+                )
+                detail_result = fetch_aweme_details_with_f2(
+                  aweme_ids=missing_detail_ids,
+                  sec_user_id=sec_user_id,
+                  cookie_str=cookie_str,
+                  user_agent=DEFAULT_USER_AGENT,
+                  auto_install=not args.no_install_f2,
+                )
+                aweme_list = merge_aweme_lists_by_id(
+                  aweme_list,
+                  detail_result.aweme_list,
+                  preferred_order=browser_ids,
+                )
+                source_path = "f2+browser+detail"
+                diagnostics.append({
+                  "backend": "f2_detail_fill",
+                  "requested": detail_result.requested,
+                  "items": len(detail_result.aweme_list),
+                  "errors": len(detail_result.errors),
+                })
             incomplete_reason = collection_incomplete_reason(
               len(aweme_list),
               expected_count=f2_result.expected_count,
