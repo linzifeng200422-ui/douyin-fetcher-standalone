@@ -723,6 +723,16 @@ def scrape_user_posts_via_browser_fallback(
         stable_rounds += 1
       else:
         stable_rounds = 0
+      if (
+        target is not None
+        and len(id_order) >= target
+        and stable_rounds >= max(2, idle_rounds)
+      ):
+        logger.info(
+          "浏览器兜底 ID 数已达到目标且连续 %s 轮无增长，停止滚动并进入 detail 回补。",
+          stable_rounds,
+        )
+        break
       if target is None and stable_rounds >= max(1, idle_rounds):
         break
 
