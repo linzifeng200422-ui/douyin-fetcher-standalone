@@ -317,6 +317,12 @@ async def main():
                 "has_more": has_more,
                 "max_cursor": max_cursor,
                 "status_code": raw.get("status_code") if isinstance(raw, dict) else None,
+                "login_tip": bool(
+                    ((raw.get("not_login_module") or {}).get("guide_login_tip_exist"))
+                    if isinstance(raw, dict) and isinstance(raw.get("not_login_module"), dict)
+                    else False
+                ),
+                "verify_page": bool(raw.get("verify_ticket")) if isinstance(raw, dict) else False,
             })
             if not page_items:
                 continue

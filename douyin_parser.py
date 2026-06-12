@@ -1331,6 +1331,8 @@ def main():
 
         source_path = "f2"
         diagnostics = list(f2_result.page_diagnostics)
+        if any(item.get("login_tip") for item in diagnostics):
+          logger.warning("抖音接口返回登录提示：当前 Cookie 可能是游客态或登录态不足。")
         incomplete_reason = collection_incomplete_reason(
           len(aweme_list),
           expected_count=f2_result.expected_count,

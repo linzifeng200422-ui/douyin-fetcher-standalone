@@ -4,7 +4,9 @@
 
 本工具为独立项目，不依赖任何第三方内容校准框架。
 
-当前推荐抖音主页后端是 [Johnserf-Seed/f2](https://github.com/Johnserf-Seed/f2)。本项目只复用 F2 的作品列表分页、A-Bogus 签名和必要下载能力，不使用 F2 的 `--auto-cookie`。登录态仍通过本项目的 `get_cookie.py` 写入 `cookie.txt` 和 `.auth/`。
+当前推荐抖音主页主后端是 [Johnserf-Seed/f2](https://github.com/Johnserf-Seed/f2)。本项目复用 F2 的作品列表分页、A-Bogus 签名和单作品 detail 能力，不使用 F2 的 `--auto-cookie`。登录态仍通过本项目的 `get_cookie.py` 写入 `cookie.txt` 和 `.auth/`。
+
+注意：抖音主页分页经常出现“第一页正常、第二页空 200”的风控现象。现在程序会读取主页 `aweme_count` 做完整性校验；如果 F2 只拿到部分作品，会启动浏览器主页兜底和 detail 回补，仍不完整则退出失败，不会把 21/22 条误报为全量完成。
 
 ## 系统要求 (System Requirements)
 
@@ -67,6 +69,26 @@ python3 douyin_parser.py \
 ```
 
 `--all` 会让 F2 按 `max_cursor/has_more` 分页模型拉取全部可访问作品。中途 `Ctrl+C` 后，已成功写入 `video.mp4`、`audio.mp3` 且 `collection-status.json(status=success)` 的作品会在下次运行时跳过。
+如果 F2 返回数量少于主页 `aweme_count`，默认会打开浏览器兜底：
+
+```bash
+python3 douyin_parser.py \
+  --url "https://v.douyin.com/user_home_link/" \
+  --backend f2 \
+  --all \
+  --skip-asr
+```
+
+浏览器兜底会滚动主页、拦截 `/aweme/v1/web/aweme/post/`，并对只拿到 ID 的作品用 F2 detail API 补元数据。若出现验证码或登录弹窗，请在弹出的浏览器里处理。调试时可以关闭兜底，只看 F2 原始列表完整性：
+
+```bash
+python3 douyin_parser.py \
+  --url "https://v.douyin.com/user_home_link/" \
+  --backend f2 \
+  --all \
+  --list-only \
+  --no-browser-fallback
+```
 
 ### 7. 批量拉取个人主页最近作品
 ```bash
@@ -99,7 +121,7 @@ python3 douyin_parser.py --url "<抖音链接>" --backend legacy --count 3
 后端含义：
 
 *   `auto`：默认模式。抖音主页优先走 F2；通用非抖音链接交给 `yt-dlp`。
-*   `f2`：抖音博主主页主后端，支持 `--all`，不逐个打开视频详情页。
+*   `f2`：抖音博主主页主后端，支持 `--all`；先用主页分页，必要时浏览器滚动主页和 F2 detail 回补，不逐个打开视频网页。
 *   `yt-dlp`：通用视频链接后端，只负责下载，最终目录仍由本项目归一化。
 *   `legacy`：旧公共 API / 本地 API / Playwright 兜底逻辑，不支持 `--all`。
 
@@ -110,6 +132,16 @@ python3 douyin_parser.py --url "<抖音主页链接>" --backend f2 --list-only -
 ```
 
 F2 的临时输入配置写入 `.external/runtime/`，权限为 `0600`，执行后清理。Cookie 不会出现在 F2 子进程命令行参数里。
+
+相关兜底参数：
+
+```bash
+--browser-fallback / --no-browser-fallback
+--browser-headless
+--browser-max-scrolls 240
+--browser-wait-timeout 600
+--detail-fill / --no-detail-fill
+```
 
 ---
 

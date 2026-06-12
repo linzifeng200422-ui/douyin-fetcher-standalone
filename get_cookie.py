@@ -10,6 +10,22 @@ except ImportError:
     print("错误：未检测到 playwright 库。请先运行: pip install playwright && playwright install chromium")
     sys.exit(1)
 
+LOGIN_COOKIE_NAMES = {
+    "sessionid",
+    "sessionid_ss",
+    "sid_guard",
+    "uid_tt",
+    "uid_tt_ss",
+    "passport_auth_status",
+    "passport_auth_status_ss",
+}
+
+
+def has_login_cookie(cookies) -> bool:
+    names = {str(cookie.get("name") or "") for cookie in cookies or []}
+    return bool(names & LOGIN_COOKIE_NAMES)
+
+
 async def main():
     print("==================================================")
     print("正在启动浏览器以获取抖音 Cookie...")
@@ -40,6 +56,10 @@ async def main():
                 # 仅限过滤抖音核心域名的 Cookie
                 cookies = await context.cookies("https://www.douyin.com")
                 if cookies:
+                    if not has_login_cookie(cookies):
+                        print("等待扫码登录：当前只检测到游客 Cookie，暂不覆盖 cookie.txt/state.json。", flush=True)
+                        return
+
                     cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
                     cookie_file = Path("cookie.txt")
                     cookie_file.write_text(cookie_str, encoding="utf-8")
