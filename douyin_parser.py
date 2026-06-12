@@ -446,7 +446,14 @@ def sanitize_folder_name(value: str) -> str:
 def is_completed_video_dir(video_dir: Path) -> bool:
   status_path = video_dir / "collection-status.json"
   audio_path = video_dir / "audio.mp3"
-  if not status_path.is_file() or not audio_path.is_file() or audio_path.stat().st_size <= 0:
+  video_path = video_dir / "video.mp4"
+  if (
+    not status_path.is_file()
+    or not video_path.is_file()
+    or video_path.stat().st_size <= 0
+    or not audio_path.is_file()
+    or audio_path.stat().st_size <= 0
+  ):
     return False
   try:
     status = json.loads(status_path.read_text(encoding="utf-8"))
@@ -549,6 +556,15 @@ def finalize_transcript(
     logger.warning("语音识别失败或跳过，已写入空占位文件。")
 
 
+def extract_audio_from_video(video_path: Path, audio_path: Path) -> None:
+  cmd_ffmpeg = [
+    "ffmpeg", "-y", "-i", str(video_path),
+    "-vn", "-acodec", "libmp3lame", "-q:a", "2",
+    str(audio_path)
+  ]
+  subprocess.run(cmd_ffmpeg, check=True, capture_output=True)
+
+
 def process_aweme_list(
   aweme_list: list[dict[str, Any]],
   *,
@@ -576,6 +592,7 @@ def process_aweme_list(
     video_dir = output_base / account_folder / aweme_id
     video_dir.mkdir(parents=True, exist_ok=True)
     audio_path = video_dir / "audio.mp3"
+    video_path = video_dir / "video.mp4"
 
     if is_completed_video_dir(video_dir):
       logger.info(f"[{i+1}/{len(aweme_list)}] 跳过已完成作品: {aweme_id}")
@@ -588,6 +605,7 @@ def process_aweme_list(
       "metadata": True,
       "media_downloaded": False,
       "audio_ready": False,
+      "video_ready": False,
       "transcript_ready": False,
       "source_path": source_path,
       "notes": []
@@ -595,21 +613,38 @@ def process_aweme_list(
     write_sample_status(video_dir, sample_status)
 
     audio_url, video_url = get_aweme_media_urls(aweme)
-    if not audio_url and not video_url:
-      logger.warning(f"视频ID {aweme_id} 缺少可用的播放资源链接，跳过")
+    if not video_url:
+      logger.warning(f"视频ID {aweme_id} 缺少可用的视频播放资源链接，跳过")
       sample_status["status"] = "download_failed"
-      sample_status["notes"].append("no media play url found")
+      sample_status["notes"].append("no video play url found")
       write_sample_status(video_dir, sample_status)
       stats_summary["failed"] += 1
       continue
 
     logger.info(f"[{i+1}/{len(aweme_list)}] 正在拉取作品: {aweme_id} | 标题: {str(desc)[:15]}...")
 
+    logger.info("拉取无水印视频流...")
+    try:
+      download_file(video_url, video_path, cookie_str)
+      sample_status["media_downloaded"] = True
+      sample_status["video_ready"] = True
+    except KeyboardInterrupt:
+      sample_status["status"] = "interrupted"
+      sample_status["notes"].append("interrupted during video download")
+      write_sample_status(video_dir, sample_status)
+      raise
+    except Exception as e:
+      logger.error(f"视频文件下载失败: {e}")
+      sample_status["status"] = "download_failed"
+      sample_status["notes"].append(f"video download failed: {e}")
+      write_sample_status(video_dir, sample_status)
+      stats_summary["failed"] += 1
+      continue
+
     if audio_url:
       logger.info("拉取无水印音频流...")
       try:
         download_file(audio_url, audio_path, cookie_str)
-        sample_status["media_downloaded"] = True
         sample_status["audio_ready"] = True
       except KeyboardInterrupt:
         sample_status["status"] = "interrupted"
@@ -624,17 +659,9 @@ def process_aweme_list(
         stats_summary["failed"] += 1
         continue
     else:
-      logger.info("未发现直接音频流。正在抓取无水印视频并提取音轨...")
-      temp_video = video_dir / ("video.mp4" if keep_video else "temp_video.mp4")
+      logger.info("未发现直接音频流。正在从 video.mp4 提取音轨...")
       try:
-        download_file(video_url, temp_video, cookie_str)
-        sample_status["media_downloaded"] = True
-        cmd_ffmpeg = [
-          "ffmpeg", "-y", "-i", str(temp_video),
-          "-vn", "-acodec", "libmp3lame", "-q:a", "2",
-          str(audio_path)
-        ]
-        subprocess.run(cmd_ffmpeg, check=True, capture_output=True)
+        extract_audio_from_video(video_path, audio_path)
         sample_status["audio_ready"] = True
         logger.info("FFmpeg 音轨转码成功！")
       except KeyboardInterrupt:
@@ -649,9 +676,6 @@ def process_aweme_list(
         write_sample_status(video_dir, sample_status)
         stats_summary["failed"] += 1
         continue
-      finally:
-        if not keep_video and temp_video.is_file():
-          temp_video.unlink()
 
     write_meta_file(video_dir, aweme, nickname)
     try:
@@ -805,7 +829,7 @@ def main():
   parser.add_argument("--cookie-file", default="", help="读取本地 Cookie 的 txt 文件路径")
   parser.add_argument("--whisper-path", default="", help="可选：本地自定义 Whisper ASR 执行脚本路径")
   parser.add_argument("--skip-asr", action="store_true", help="跳过 Whisper 转写，适合全量下载测试")
-  parser.add_argument("--keep-video", action="store_true", help="当需要下载视频再提取音频时保留 video.mp4")
+  parser.add_argument("--keep-video", action="store_true", help="兼容旧参数；当前默认保存 video.mp4")
   parser.add_argument("--list-only", action="store_true", help="只拉取作品列表并打印 aweme_id，不下载媒体")
   parser.add_argument("--no-install-f2", action="store_true", help="F2 不存在时不自动创建 .external/venv-f2")
   args = parser.parse_args()

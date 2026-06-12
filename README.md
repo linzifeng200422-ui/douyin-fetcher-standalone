@@ -66,7 +66,7 @@ python3 douyin_parser.py \
   --skip-asr
 ```
 
-`--all` 会让 F2 按 `max_cursor/has_more` 分页模型拉取全部可访问作品。中途 `Ctrl+C` 后，已成功写入 `audio.mp3` 且 `collection-status.json(status=success)` 的作品会在下次运行时跳过。
+`--all` 会让 F2 按 `max_cursor/has_more` 分页模型拉取全部可访问作品。中途 `Ctrl+C` 后，已成功写入 `video.mp4`、`audio.mp3` 且 `collection-status.json(status=success)` 的作品会在下次运行时跳过。
 
 ### 7. 批量拉取个人主页最近作品
 ```bash
@@ -136,12 +136,13 @@ python3 get_cookie.py
 downloads/
 └── <博主昵称>/
     └── <19位视频ID>/
+        ├── video.mp4               # 无水印视频
         ├── audio.mp3               # 提取无水印音频
         ├── meta.md                 # 播放量、点赞量等统计元数据 (Markdown)
         ├── transcript.md           # Whisper 转录台词文案 (Markdown)
         └── collection-status.json  # 采集状态运行指标 (JSON)
 ```
 
-断点续跑判断条件为：`audio.mp3` 存在且非空，同时 `collection-status.json` 中 `status` 为 `success`。失败、中断或 ASR 失败的作品不会被当成已完成，会在重跑时重新处理。
+断点续跑判断条件为：`video.mp4` 和 `audio.mp3` 都存在且非空，同时 `collection-status.json` 中 `status` 为 `success`。失败、中断或 ASR 失败的作品不会被当成已完成，会在重跑时重新处理。
 
 若需了解底层解析与抓取原理（iesdouyin 网页参数解密及接口请求流），请参阅 [skills/SKILL.md](skills/SKILL.md) 详细文档。
