@@ -16,42 +16,44 @@ async def main():
     print("==================================================")
     
     async with async_playwright() as p:
-        # 启动 headed 模式浏览器
-        browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        # 使用持久化上下文启动 headed 模式浏览器，以便保存登录态，防止重复登录
+        auth_dir = Path(".auth")
+        auth_dir.mkdir(exist_ok=True)
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=str(auth_dir.resolve()),
+            headless=False,
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1440, "height": 900},
+            args=["--disable-blink-features=AutomationControlled"]
         )
-        page = await context.new_page()
+        page = context.pages[0] if context.pages else await context.new_page()
         
         # 打开抖音官网
         await page.goto("https://www.douyin.com")
         
         print("\n[提示] 请在弹出的浏览器窗口中正常浏览，或直接扫码登录（若需要）。")
-        print("[提示] 准备就绪后，直接关闭弹出的浏览器窗口，脚本将自动提取并保存 Cookie。")
+        print("[提示] 已经实现【实时保存】，你无需关闭浏览器，直接扫码，脚本会自动更新 cookie.txt 并执行下载！")
         
-        # 循环等待，直到浏览器被关闭
+        # 循环等待，直到浏览器被关闭，期间每 2 秒自动保存一次 Cookie
         try:
             while True:
                 # 检查浏览器是否还处于开启状态
-                if not browser.is_connected() or len(context.pages) == 0:
+                if len(context.pages) == 0:
                     break
-                await asyncio.sleep(1)
-        except Exception:
-            pass
+                
+                # 实时提取并保存 Cookie
+                cookies = await context.cookies()
+                if cookies:
+                    cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+                    cookie_file = Path("cookie.txt")
+                    cookie_file.write_text(cookie_str, encoding="utf-8")
+                    print(f"✓ 实时同步 {len(cookies)} 个 Cookie 到 cookie.txt...", flush=True)
+
+                await asyncio.sleep(2)
+        except Exception as e:
+            print(f"提取过程发生异常: {e}")
             
-        # 提取并格式化 Cookie
-        cookies = await context.cookies()
-        if cookies:
-            cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-            cookie_file = Path("cookie.txt")
-            cookie_file.write_text(cookie_str, encoding="utf-8")
-            print(f"\n✓ 成功提取 {len(cookies)} 个 Cookie 指标！")
-            print(f"✓ Cookie 已成功写入至: {cookie_file.resolve()}")
-            print("==================================================")
-        else:
-            print("\n❌ 未能获取到有效的 Cookie，请确保浏览器已成功打开过页面。")
-            
-        await browser.close()
+        await context.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
