@@ -21,6 +21,7 @@ from external_backends import (
   YtDlpItem,
   fetch_user_posts_with_f2,
   looks_like_douyin_url,
+  parse_cookie_header,
   probe_ytdlp_items,
   run_ytdlp_audio,
 )
@@ -35,6 +36,15 @@ LOCAL_API_BASE_URL = os.getenv("LOCAL_DOUYIN_API_BASE_URL", "http://127.0.0.1:80
 
 # 统一全局高仿 User-Agent，避免 UA 不匹配风控
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+SESSION_COOKIE_NAMES = {
+  "sessionid",
+  "sessionid_ss",
+  "sid_guard",
+  "uid_tt",
+  "uid_tt_ss",
+  "passport_auth_status",
+  "passport_auth_status_ss",
+}
 
 def load_cookie(cookie_str: str = "", cookie_file: str = "") -> str:
   """
@@ -357,6 +367,314 @@ def scrape_user_videos_via_browser(sec_user_id: str, count: int) -> tuple[list[d
     browser.close()
 
   return aweme_details, nickname
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+  try:
+    number = int(value)
+  except (TypeError, ValueError):
+    return None
+  return number if number > 0 else None
+
+
+def collection_target_count(expected_count: int | None, count_limit: int | None) -> int | None:
+  expected = _coerce_positive_int(expected_count)
+  limit = _coerce_positive_int(count_limit)
+  if limit is not None and expected is not None:
+    return min(limit, expected)
+  if limit is not None:
+    return limit
+  return expected
+
+
+def collection_incomplete_reason(
+  actual_count: int,
+  *,
+  expected_count: int | None,
+  count_limit: int | None,
+  has_more: bool = False,
+) -> str:
+  if count_limit is None and _coerce_positive_int(expected_count) is None:
+    return f"无法获取主页作品总数，不能验证 --all 完整性；本次只拿到 {actual_count} 个"
+  target = collection_target_count(expected_count, count_limit)
+  if target is not None and actual_count < target:
+    if expected_count:
+      return f"作品列表不完整：主页显示 {expected_count} 个作品，本次只拿到 {actual_count} 个，目标至少 {target} 个"
+    return f"作品列表不完整：目标 {target} 个，本次只拿到 {actual_count} 个"
+  if count_limit is None and has_more:
+    return f"作品列表分页仍显示 has_more=true，但本次只拿到 {actual_count} 个"
+  return ""
+
+
+def merge_aweme_lists_by_id(
+  base_items: list[dict[str, Any]],
+  extra_items: list[dict[str, Any]],
+  preferred_order: list[str] | None = None,
+) -> list[dict[str, Any]]:
+  by_id: dict[str, dict[str, Any]] = {}
+  order: list[str] = []
+
+  def add_item(item: dict[str, Any], *, override: bool) -> None:
+    aweme_id = str(item.get("aweme_id") or item.get("video_id") or "").strip()
+    if not aweme_id:
+      return
+    if aweme_id not in by_id:
+      order.append(aweme_id)
+    if override or aweme_id not in by_id:
+      by_id[aweme_id] = item
+
+  for item in base_items:
+    if isinstance(item, dict):
+      add_item(item, override=False)
+  for item in extra_items:
+    if isinstance(item, dict):
+      add_item(item, override=True)
+
+  final_order: list[str] = []
+  seen: set[str] = set()
+  for aweme_id in preferred_order or []:
+    if aweme_id in by_id and aweme_id not in seen:
+      final_order.append(aweme_id)
+      seen.add(aweme_id)
+  for aweme_id in order:
+    if aweme_id in by_id and aweme_id not in seen:
+      final_order.append(aweme_id)
+      seen.add(aweme_id)
+  return [by_id[aweme_id] for aweme_id in final_order]
+
+
+def add_cookie_header_to_context(context, cookie_str: str) -> None:
+  cookies = []
+  for name, value in parse_cookie_header(cookie_str).items():
+    cookies.append({
+      "name": name,
+      "value": value,
+      "url": "https://www.douyin.com/",
+    })
+  if cookies:
+    context.add_cookies(cookies)
+
+
+def persist_browser_auth_if_logged_in(context) -> None:
+  try:
+    cookies = context.cookies("https://www.douyin.com")
+  except Exception as exc:
+    logger.debug(f"读取浏览器 Cookie 失败，跳过同步: {exc}")
+    return
+
+  if not cookies:
+    return
+  cookie_names = {str(cookie.get("name") or "") for cookie in cookies}
+  if not (cookie_names & SESSION_COOKIE_NAMES):
+    logger.warning("浏览器上下文未检测到登录态 Cookie，不覆盖 cookie.txt 或 .auth/state.json。")
+    return
+
+  cookie_str = "; ".join(
+    f"{cookie.get('name')}={cookie.get('value')}"
+    for cookie in cookies
+    if cookie.get("name") and cookie.get("value")
+  )
+  Path("cookie.txt").write_text(cookie_str, encoding="utf-8")
+  auth_dir = Path(".auth")
+  auth_dir.mkdir(exist_ok=True)
+  context.storage_state(path=str(auth_dir / "state.json"))
+  logger.info("已从浏览器兜底上下文同步登录态到 cookie.txt 和 .auth/state.json。")
+
+
+def extract_aweme_ids_from_page(page) -> list[str]:
+  script = r"""
+() => {
+  const result = [];
+  const seen = new Set();
+  const push = (id) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    result.push(id);
+  };
+  const collectFrom = (text, pattern) => {
+    if (!text) return;
+    let match;
+    while ((match = pattern.exec(text)) !== null) push(match[1]);
+  };
+  for (const node of document.querySelectorAll("a[href]")) {
+    const href = node.getAttribute("href") || "";
+    collectFrom(href, /\/video\/(\d{15,20})/g);
+    collectFrom(href, /\/note\/(\d{15,20})/g);
+  }
+  const html = document.documentElement ? document.documentElement.innerHTML : "";
+  collectFrom(html, /"aweme_id":"(\d{15,20})"/g);
+  collectFrom(html, /"group_id":"(\d{15,20})"/g);
+  return result;
+}
+"""
+  try:
+    data = page.evaluate(script)
+  except Exception as exc:
+    logger.debug(f"从页面提取 aweme_id 失败: {exc}")
+    return []
+  if not isinstance(data, list):
+    return []
+  return [str(item) for item in data if item]
+
+
+def scrape_user_posts_via_browser_fallback(
+  sec_user_id: str,
+  *,
+  cookie_str: str,
+  expected_count: int | None,
+  count_limit: int | None,
+  headless: bool,
+  max_scrolls: int,
+  idle_rounds: int,
+  wait_timeout_seconds: int,
+) -> tuple[list[dict[str, Any]], str, list[str]]:
+  try:
+    from playwright.sync_api import sync_playwright
+  except ImportError:
+    logger.error("未检测到 playwright 库。请先安装: pip install playwright && playwright install chromium")
+    return [], "", []
+
+  target = collection_target_count(expected_count, count_limit)
+  target_url = f"https://www.douyin.com/user/{sec_user_id}"
+  state_file = Path(".auth/state.json")
+  post_aweme_by_id: dict[str, dict[str, Any]] = {}
+  id_order: list[str] = []
+  id_seen: set[str] = set()
+  nickname = ""
+  post_api_pages = 0
+
+  def merge_ids(new_ids: list[str]) -> None:
+    for aweme_id in new_ids:
+      if aweme_id and aweme_id not in id_seen:
+        id_seen.add(aweme_id)
+        id_order.append(aweme_id)
+
+  logger.warning(
+    "F2/API 分页疑似受限，启动浏览器主页兜底。若出现验证码，请在弹出的浏览器中手动完成验证。"
+  )
+
+  with sync_playwright() as p:
+    browser = p.chromium.launch(
+      headless=headless,
+      args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"],
+    )
+    if state_file.is_file():
+      context = browser.new_context(
+        storage_state=str(state_file),
+        user_agent=DEFAULT_USER_AGENT,
+        locale="zh-CN",
+        viewport={"width": 1600, "height": 900},
+      )
+    else:
+      context = browser.new_context(
+        user_agent=DEFAULT_USER_AGENT,
+        locale="zh-CN",
+        viewport={"width": 1600, "height": 900},
+      )
+    add_cookie_header_to_context(context, cookie_str)
+    page = context.new_page()
+
+    def handle_response(response) -> None:
+      nonlocal post_api_pages
+      if "/aweme/v1/web/aweme/post/" not in (response.url or ""):
+        return
+      try:
+        data = response.json()
+      except Exception:
+        return
+      if not isinstance(data, dict):
+        return
+      page_items = data.get("aweme_list")
+      if not isinstance(page_items, list):
+        return
+      post_api_pages += 1
+      extracted_ids: list[str] = []
+      for item in page_items:
+        if not isinstance(item, dict):
+          continue
+        aweme_id = str(item.get("aweme_id") or item.get("video_id") or "").strip()
+        if not aweme_id:
+          continue
+        extracted_ids.append(aweme_id)
+        post_aweme_by_id[aweme_id] = item
+      merge_ids(extracted_ids)
+
+    page.on("response", handle_response)
+    try:
+      page.goto(target_url, wait_until="domcontentloaded", timeout=max(30, wait_timeout_seconds) * 1000)
+    except Exception as exc:
+      logger.warning(f"浏览器主页加载异常，继续尝试从当前页面采集: {exc}")
+
+    try:
+      title = page.title()
+      if "验证码" in title and not headless:
+        logger.warning("检测到验证码页面，请手动完成验证；程序会继续等待页面恢复。")
+        deadline = page.context.pages[0].evaluate("Date.now()") + wait_timeout_seconds * 1000
+        while page.evaluate("Date.now()") < deadline:
+          if "验证码" not in page.title():
+            break
+          page.wait_for_timeout(1000)
+      if "的主页" in title:
+        nickname = title.split("的主页")[0].strip()
+      elif "的个人主页" in title:
+        nickname = title.split("的个人主页")[0].strip()
+      elif title:
+        nickname = title.split(" - ")[0].strip()
+    except Exception:
+      pass
+
+    stable_rounds = 0
+    for scroll_index in range(max(1, max_scrolls)):
+      before = len(id_order) + len(post_aweme_by_id)
+      merge_ids(extract_aweme_ids_from_page(page))
+      logger.info(
+        "浏览器兜底滚动 %s/%s：ID=%s，带详情=%s，目标=%s",
+        scroll_index + 1,
+        max_scrolls,
+        len(id_order),
+        len(post_aweme_by_id),
+        target or "unknown",
+      )
+      if target is not None and len(post_aweme_by_id) >= target:
+        break
+      try:
+        page.mouse.wheel(0, 3800)
+        page.wait_for_timeout(1200)
+      except Exception:
+        break
+      after = len(id_order) + len(post_aweme_by_id)
+      if after <= before:
+        stable_rounds += 1
+      else:
+        stable_rounds = 0
+      if target is None and stable_rounds >= max(1, idle_rounds):
+        break
+
+    try:
+      page.wait_for_timeout(1000)
+    except Exception:
+      pass
+    persist_browser_auth_if_logged_in(context)
+    context.close()
+    browser.close()
+
+  browser_items = [
+    post_aweme_by_id[aweme_id]
+    for aweme_id in id_order
+    if aweme_id in post_aweme_by_id
+  ]
+  for aweme_id, item in post_aweme_by_id.items():
+    if aweme_id not in id_seen:
+      browser_items.append(item)
+
+  logger.warning(
+    "浏览器兜底采集结束：主页接口页数=%s，ID=%s，完整元数据=%s",
+    post_api_pages,
+    len(id_order),
+    len(browser_items),
+  )
+  return browser_items, nickname, id_order
+
 
 def download_file(url: str, dest_path: Path, cookie: str = ""):
   """
@@ -803,14 +1121,30 @@ def process_ytdlp_items(
   return summary
 
 
-def print_list_probe(aweme_list: list[dict[str, Any]]) -> None:
-  print(json.dumps({
+def print_list_probe(
+  aweme_list: list[dict[str, Any]],
+  *,
+  source: str = "",
+  expected_count: int | None = None,
+  complete: bool | None = None,
+  pages: int | None = None,
+  diagnostics: list[dict[str, Any]] | None = None,
+) -> None:
+  payload: dict[str, Any] = {
     "count": len(aweme_list),
+    "expected_count": expected_count,
+    "complete": complete,
+    "source": source,
     "aweme_ids": [
       str(item.get("aweme_id") or item.get("video_id") or "")
       for item in aweme_list
     ],
-  }, ensure_ascii=False, indent=2))
+  }
+  if pages is not None:
+    payload["pages"] = pages
+  if diagnostics is not None:
+    payload["diagnostics"] = diagnostics
+  print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 def main():
   parser = argparse.ArgumentParser(description="抖音视频/主页无水印极速解析与台词转录工具 (独立开源版)")
@@ -832,6 +1166,16 @@ def main():
   parser.add_argument("--keep-video", action="store_true", help="兼容旧参数；当前默认保存 video.mp4")
   parser.add_argument("--list-only", action="store_true", help="只拉取作品列表并打印 aweme_id，不下载媒体")
   parser.add_argument("--no-install-f2", action="store_true", help="F2 不存在时不自动创建 .external/venv-f2")
+  parser.add_argument(
+    "--browser-fallback",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="F2/API 分页不完整时启动浏览器主页兜底；默认开启",
+  )
+  parser.add_argument("--browser-headless", action="store_true", help="浏览器兜底使用 headless 模式；默认弹窗方便手动过验证")
+  parser.add_argument("--browser-max-scrolls", type=int, default=240, help="浏览器兜底最大滚动次数")
+  parser.add_argument("--browser-idle-rounds", type=int, default=8, help="未知总量时连续无增长多少轮后停止")
+  parser.add_argument("--browser-wait-timeout", type=int, default=600, help="浏览器兜底等待验证码/页面恢复的秒数")
   args = parser.parse_args()
 
   cookie_str = load_cookie(args.cookie, args.cookie_file)
@@ -948,22 +1292,85 @@ def main():
         )
         aweme_list = f2_result.aweme_list
         logger.info(
-          "F2 后端拉取完成：%s 页，%s 个作品",
+          "F2 后端拉取完成：%s 页，%s 个作品，主页总数=%s，has_more=%s",
           f2_result.pages,
           len(aweme_list),
+          f2_result.expected_count,
+          f2_result.has_more,
         )
+        if f2_result.nickname:
+          nickname = args.account_name or f2_result.nickname
         for aweme in aweme_list:
           candidate = extract_author_nickname(aweme, "")
           if candidate:
             nickname = args.account_name or candidate
             break
 
-        if args.list_only:
-          print_list_probe(aweme_list)
-          return
-
         if not aweme_list:
           logger.error("F2 后端未返回任何作品。请检查 Cookie 是否有效或稍后重试。")
+          sys.exit(1)
+
+        source_path = "f2"
+        diagnostics = list(f2_result.page_diagnostics)
+        incomplete_reason = collection_incomplete_reason(
+          len(aweme_list),
+          expected_count=f2_result.expected_count,
+          count_limit=count_limit,
+          has_more=f2_result.has_more,
+        )
+
+        if incomplete_reason:
+          logger.warning("F2 作品列表不完整：%s", incomplete_reason)
+          if args.browser_fallback:
+            browser_items, browser_nickname, browser_ids = scrape_user_posts_via_browser_fallback(
+              sec_user_id,
+              cookie_str=cookie_str,
+              expected_count=f2_result.expected_count,
+              count_limit=count_limit,
+              headless=args.browser_headless,
+              max_scrolls=args.browser_max_scrolls,
+              idle_rounds=args.browser_idle_rounds,
+              wait_timeout_seconds=args.browser_wait_timeout,
+            )
+            if browser_nickname:
+              nickname = args.account_name or browser_nickname
+            aweme_list = merge_aweme_lists_by_id(
+              aweme_list,
+              browser_items,
+              preferred_order=browser_ids,
+            )
+            source_path = "f2+browser"
+            diagnostics.append({
+              "backend": "browser_fallback",
+              "items": len(browser_items),
+              "ids": len(browser_ids),
+            })
+            incomplete_reason = collection_incomplete_reason(
+              len(aweme_list),
+              expected_count=f2_result.expected_count,
+              count_limit=count_limit,
+              has_more=False,
+            )
+
+        if args.list_only:
+          print_list_probe(
+            aweme_list,
+            source=source_path,
+            expected_count=f2_result.expected_count,
+            complete=not bool(incomplete_reason),
+            pages=f2_result.pages,
+            diagnostics=diagnostics,
+          )
+          if incomplete_reason:
+            logger.error("列表探测未通过完整性校验：%s", incomplete_reason)
+            sys.exit(1)
+          return
+
+        if incomplete_reason:
+          logger.error(
+            "拒绝执行全量下载：%s。请保持浏览器兜底窗口打开并完成验证，或稍后重试。",
+            incomplete_reason,
+          )
           sys.exit(1)
 
         summary = process_aweme_list(
@@ -974,7 +1381,7 @@ def main():
           whisper_path=args.whisper_path,
           skip_asr=args.skip_asr,
           keep_video=args.keep_video,
-          source_path="f2",
+          source_path=source_path,
         )
         logger.info(
           "F2 后端任务结束：成功 %s / 跳过 %s / 失败 %s / 总计 %s",

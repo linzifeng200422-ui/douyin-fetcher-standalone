@@ -16,7 +16,7 @@ import shutil
 import signal
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,11 @@ class F2FetchResult:
   aweme_list: list[dict[str, Any]]
   pages: int
   sec_user_id: str
+  expected_count: int | None = None
+  nickname: str = ""
+  has_more: bool = False
+  next_cursor: int = 0
+  page_diagnostics: list[dict[str, Any]] = field(default_factory=list)
   source: str = "f2"
 
 
@@ -255,6 +260,11 @@ async def main():
         "ok": True,
         "sec_user_id": sec_user_id,
         "pages": 0,
+        "expected_count": None,
+        "nickname": "",
+        "has_more": False,
+        "next_cursor": 0,
+        "page_diagnostics": [],
         "aweme_list": [],
         "errors": [],
     }
@@ -263,6 +273,22 @@ async def main():
 
     try:
         handler = DouyinHandler(kwargs)
+        try:
+            profile = await handler.fetch_user_profile(sec_user_id)
+            raw_profile = profile._to_raw() if hasattr(profile, "_to_raw") else {}
+            expected_count = getattr(profile, "aweme_count", None)
+            nickname = getattr(profile, "nickname", None)
+            if expected_count is None and isinstance(raw_profile, dict):
+                expected_count = (raw_profile.get("user") or {}).get("aweme_count")
+            if nickname is None and isinstance(raw_profile, dict):
+                nickname = (raw_profile.get("user") or {}).get("nickname")
+            if expected_count is not None:
+                result["expected_count"] = int(expected_count)
+            if nickname:
+                result["nickname"] = str(nickname)
+        except Exception as exc:
+            result["errors"].append(f"profile fetch failed: {exc}")
+
         async for page in handler.fetch_user_post_videos(
             sec_user_id,
             0,
@@ -272,7 +298,18 @@ async def main():
         ):
             result["pages"] += 1
             raw = page._to_raw() if hasattr(page, "_to_raw") else {}
+            has_more = bool(raw.get("has_more")) if isinstance(raw, dict) else False
+            max_cursor = int(raw.get("max_cursor") or 0) if isinstance(raw, dict) else 0
+            result["has_more"] = has_more
+            result["next_cursor"] = max_cursor
             page_items = raw.get("aweme_list") if isinstance(raw, dict) else []
+            result["page_diagnostics"].append({
+                "page": result["pages"],
+                "items": len(page_items) if isinstance(page_items, list) else 0,
+                "has_more": has_more,
+                "max_cursor": max_cursor,
+                "status_code": raw.get("status_code") if isinstance(raw, dict) else None,
+            })
             if not page_items:
                 continue
             for aweme in page_items:
@@ -348,10 +385,22 @@ def fetch_user_posts_with_f2(
       errors = "; ".join(data.get("errors") or ["unknown error"])
       raise ExternalBackendError(f"F2 作品列表抓取失败: {errors}")
     aweme_list = data.get("aweme_list") or []
+    expected_count = data.get("expected_count")
+    try:
+      expected_count = int(expected_count) if expected_count is not None else None
+    except (TypeError, ValueError):
+      expected_count = None
     return F2FetchResult(
       aweme_list=[item for item in aweme_list if isinstance(item, dict)],
       pages=int(data.get("pages") or 0),
       sec_user_id=sec_user_id,
+      expected_count=expected_count,
+      nickname=str(data.get("nickname") or ""),
+      has_more=bool(data.get("has_more")),
+      next_cursor=int(data.get("next_cursor") or 0),
+      page_diagnostics=[
+        item for item in data.get("page_diagnostics", []) if isinstance(item, dict)
+      ],
     )
   finally:
     cleanup_paths(cleanup_targets)
