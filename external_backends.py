@@ -109,6 +109,19 @@ def redact_cookie_values(text: str, cookie_str: str) -> str:
   return redacted
 
 
+def summarize_backend_error(details: str) -> str:
+  compact = " ".join((details or "").split())
+  if (
+    "请求响应内容为空" in compact
+    or "cookie" in compact.lower()
+    or "unauthorized" in compact.lower()
+  ):
+    return "F2 返回空响应，通常是 cookie.txt 失效或登录态变成游客态。请重新运行 get_cookie.py 扫码登录后再试。"
+  if len(compact) > 600:
+    return compact[:600] + "..."
+  return compact or "unknown error"
+
+
 def venv_python_path(venv_dir: Path) -> Path:
   if os.name == "nt":
     return venv_dir / "Scripts" / "python.exe"
@@ -327,7 +340,7 @@ def fetch_user_posts_with_f2(
     result = run_supervised(cmd, cookie_str=cookie_str)
     if result.returncode != 0:
       details = result.stderr.strip() or result.stdout.strip()
-      raise ExternalBackendError(f"F2 作品列表抓取失败: {details}")
+      raise ExternalBackendError(f"F2 作品列表抓取失败: {summarize_backend_error(details)}")
     if not output_path.is_file():
       raise ExternalBackendError("F2 未生成作品列表输出。")
     data = json.loads(output_path.read_text(encoding="utf-8"))
