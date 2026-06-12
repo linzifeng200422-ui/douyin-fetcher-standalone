@@ -48,7 +48,7 @@ async def main():
         await page.goto("https://www.douyin.com")
         
         print("\n[提示] 请在弹出的浏览器窗口中正常浏览，或直接扫码登录（若需要）。")
-        print("[提示] 已经实现【实时保存】，你无需关闭浏览器，直接扫码，脚本会自动更新 cookie.txt 并执行下载！")
+        print("[提示] 登录态 Cookie 出现后会自动更新 cookie.txt 和 .auth/state.json；游客 Cookie 不会覆盖旧文件。")
         
         # 定义提取并保存的异步函数
         async def save_cookies_and_state():
