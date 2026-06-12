@@ -10,6 +10,7 @@ temp_video.mp4
 cookie.txt
 .auth/
 .external/
+logs/
 
 # macOS 系统残留
 .DS_Store
