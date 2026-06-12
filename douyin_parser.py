@@ -14,6 +14,15 @@ import sys
 import subprocess
 import urllib.parse
 from pathlib import Path
+from typing import Any
+
+from external_backends import (
+  ExternalBackendError,
+  YtDlpItem,
+  fetch_user_posts_with_f2,
+  looks_like_douyin_url,
+  run_ytdlp_audio,
+)
 
 # 配置全局日志
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -427,15 +436,341 @@ def run_whisper_transcription(audio_path: Path, output_dir: Path, whisper_path: 
   
   return False
 
+
+def sanitize_folder_name(value: str) -> str:
+  safe = re.sub(r'[\\/:*?"<>| ]', "_", value or "未命名账号")
+  return safe.strip("._") or "未命名账号"
+
+
+def is_completed_video_dir(video_dir: Path) -> bool:
+  status_path = video_dir / "collection-status.json"
+  audio_path = video_dir / "audio.mp3"
+  if not status_path.is_file() or not audio_path.is_file() or audio_path.stat().st_size <= 0:
+    return False
+  try:
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+  except Exception:
+    return False
+  return status.get("status") == "success"
+
+
+def extract_author_nickname(aweme: dict[str, Any], default: str = "未命名账号") -> str:
+  author = aweme.get("author") if isinstance(aweme.get("author"), dict) else {}
+  return (
+    author.get("nickname")
+    or aweme.get("nickname")
+    or aweme.get("author_name")
+    or default
+  )
+
+
+def get_aweme_media_urls(aweme: dict[str, Any]) -> tuple[str, str]:
+  audio_url = ""
+  music_info = aweme.get("music", {})
+  if isinstance(music_info, dict) and music_info.get("play_url"):
+    play_url = music_info["play_url"]
+    if isinstance(play_url, dict):
+      url_list = play_url.get("url_list")
+      if url_list:
+        audio_url = url_list[0]
+      elif play_url.get("uri"):
+        audio_url = play_url["uri"]
+
+  video_url = ""
+  video_info = aweme.get("video", {})
+  if isinstance(video_info, dict):
+    play_addr = video_info.get("play_addr") or video_info.get("play_addr_h264")
+    if isinstance(play_addr, dict):
+      v_url_list = play_addr.get("url_list")
+      if v_url_list:
+        video_url = v_url_list[0].replace("playwm", "play")
+    bit_rate = video_info.get("bit_rate")
+    if not video_url and isinstance(bit_rate, list) and bit_rate:
+      first_rate = bit_rate[0]
+      if isinstance(first_rate, dict):
+        br_play_addr = first_rate.get("play_addr")
+        if isinstance(br_play_addr, dict) and br_play_addr.get("url_list"):
+          video_url = br_play_addr["url_list"][0].replace("playwm", "play")
+
+  return audio_url, video_url
+
+
+def write_meta_file(video_dir: Path, aweme: dict[str, Any], nickname: str) -> None:
+  aweme_id = aweme.get("aweme_id") or aweme.get("video_id") or "unknown"
+  desc = aweme.get("desc") or aweme.get("title") or "无标题"
+  stats = aweme.get("statistics", {}) if isinstance(aweme.get("statistics"), dict) else {}
+  raw_play = stats.get("play_count", 0) or 0
+  try:
+    play_w = round(float(raw_play) / 10000.0, 2) if float(raw_play) > 0 else 0.0
+  except Exception:
+    play_w = 0.0
+  meta_text = (
+    f"## 视频信息\n"
+    f"标题：{desc}\n"
+    f"作者：{nickname}\n"
+    f"视频ID：{aweme_id}\n\n"
+    f"## 数据\n"
+    f"播放：{play_w}w\n"
+    f"点赞：{stats.get('digg_count', 0)}\n"
+    f"评论数：{stats.get('comment_count', 0)}\n"
+    f"转发数：{stats.get('share_count', 0)}\n\n"
+  )
+  (video_dir / "meta.md").write_text(meta_text, encoding="utf-8")
+
+
+def finalize_transcript(
+  audio_path: Path,
+  video_dir: Path,
+  sample_status: dict[str, Any],
+  *,
+  skip_asr: bool,
+  whisper_path: str,
+) -> None:
+  if skip_asr:
+    transcript_path = video_dir / "transcript.md"
+    if not transcript_path.exists():
+      transcript_path.write_text("N/A", encoding="utf-8")
+    sample_status["transcript_ready"] = False
+    sample_status["status"] = "success"
+    sample_status["notes"].append("asr skipped by --skip-asr")
+    logger.info("已跳过 ASR，下载状态记为 success。")
+    return
+
+  asr_success = run_whisper_transcription(audio_path, video_dir, whisper_path)
+  if asr_success:
+    sample_status["transcript_ready"] = True
+    sample_status["status"] = "success"
+    logger.info("语音识别成功生成 transcript.md")
+  else:
+    (video_dir / "transcript.md").write_text("N/A", encoding="utf-8")
+    sample_status["status"] = "asr_failed"
+    sample_status["notes"].append("whisper command line failed or skipped")
+    logger.warning("语音识别失败或跳过，已写入空占位文件。")
+
+
+def process_aweme_list(
+  aweme_list: list[dict[str, Any]],
+  *,
+  nickname: str,
+  output_base: Path,
+  cookie_str: str,
+  whisper_path: str,
+  skip_asr: bool,
+  keep_video: bool,
+  source_path: str,
+) -> dict[str, int]:
+  account_folder = sanitize_folder_name(nickname)
+  stats_summary = {"success": 0, "failed": 0, "skipped": 0}
+
+  logger.info(f"共获取到 {len(aweme_list)} 个作品，开始依次处理媒体提取与台词转写...")
+
+  for i, aweme in enumerate(aweme_list):
+    aweme_id = str(aweme.get("aweme_id") or aweme.get("video_id") or "").strip()
+    if not aweme_id:
+      logger.warning("跳过缺少 aweme_id 的作品。")
+      stats_summary["failed"] += 1
+      continue
+
+    desc = aweme.get("desc") or aweme.get("title") or "无标题"
+    video_dir = output_base / account_folder / aweme_id
+    video_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = video_dir / "audio.mp3"
+
+    if is_completed_video_dir(video_dir):
+      logger.info(f"[{i+1}/{len(aweme_list)}] 跳过已完成作品: {aweme_id}")
+      stats_summary["skipped"] += 1
+      continue
+
+    sample_status = {
+      "video_id": aweme_id,
+      "status": "metadata_only",
+      "metadata": True,
+      "media_downloaded": False,
+      "audio_ready": False,
+      "transcript_ready": False,
+      "source_path": source_path,
+      "notes": []
+    }
+    write_sample_status(video_dir, sample_status)
+
+    audio_url, video_url = get_aweme_media_urls(aweme)
+    if not audio_url and not video_url:
+      logger.warning(f"视频ID {aweme_id} 缺少可用的播放资源链接，跳过")
+      sample_status["status"] = "download_failed"
+      sample_status["notes"].append("no media play url found")
+      write_sample_status(video_dir, sample_status)
+      stats_summary["failed"] += 1
+      continue
+
+    logger.info(f"[{i+1}/{len(aweme_list)}] 正在拉取作品: {aweme_id} | 标题: {str(desc)[:15]}...")
+
+    if audio_url:
+      logger.info("拉取无水印音频流...")
+      try:
+        download_file(audio_url, audio_path, cookie_str)
+        sample_status["media_downloaded"] = True
+        sample_status["audio_ready"] = True
+      except Exception as e:
+        logger.error(f"音频文件下载失败: {e}")
+        sample_status["status"] = "download_failed"
+        sample_status["notes"].append(f"audio download failed: {e}")
+        write_sample_status(video_dir, sample_status)
+        stats_summary["failed"] += 1
+        continue
+    else:
+      logger.info("未发现直接音频流。正在抓取无水印视频并提取音轨...")
+      temp_video = video_dir / ("video.mp4" if keep_video else "temp_video.mp4")
+      try:
+        download_file(video_url, temp_video, cookie_str)
+        sample_status["media_downloaded"] = True
+        cmd_ffmpeg = [
+          "ffmpeg", "-y", "-i", str(temp_video),
+          "-vn", "-acodec", "libmp3lame", "-q:a", "2",
+          str(audio_path)
+        ]
+        subprocess.run(cmd_ffmpeg, check=True, capture_output=True)
+        sample_status["audio_ready"] = True
+        logger.info("FFmpeg 音轨转码成功！")
+      except Exception as e:
+        logger.error(f"媒体流抓取或转码发生异常: {e}")
+        sample_status["status"] = "download_failed"
+        sample_status["notes"].append(f"ffmpeg extract audio failed: {e}")
+        write_sample_status(video_dir, sample_status)
+        stats_summary["failed"] += 1
+        continue
+      finally:
+        if not keep_video and temp_video.is_file():
+          temp_video.unlink()
+
+    write_meta_file(video_dir, aweme, nickname)
+    finalize_transcript(
+      audio_path,
+      video_dir,
+      sample_status,
+      skip_asr=skip_asr,
+      whisper_path=whisper_path,
+    )
+    write_sample_status(video_dir, sample_status)
+    if sample_status["status"] == "success":
+      stats_summary["success"] += 1
+    else:
+      stats_summary["failed"] += 1
+
+  return stats_summary
+
+
+def process_ytdlp_items(
+  items: list[YtDlpItem],
+  *,
+  output_base: Path,
+  whisper_path: str,
+  skip_asr: bool,
+) -> dict[str, int]:
+  summary = {"success": 0, "failed": 0, "skipped": 0}
+  for item in items:
+    account_folder = sanitize_folder_name(item.uploader or item.extractor or "external")
+    media_id = sanitize_folder_name(item.media_id)
+    video_dir = output_base / account_folder / media_id
+    video_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = video_dir / "audio.mp3"
+
+    if is_completed_video_dir(video_dir):
+      logger.info(f"跳过已完成外部作品: {media_id}")
+      summary["skipped"] += 1
+      continue
+
+    sample_status = {
+      "video_id": media_id,
+      "status": "metadata_only",
+      "metadata": True,
+      "media_downloaded": False,
+      "audio_ready": False,
+      "transcript_ready": False,
+      "source_path": f"yt-dlp:{item.extractor}",
+      "notes": [],
+    }
+    write_sample_status(video_dir, sample_status)
+
+    try:
+      if item.audio_path.suffix.lower() == ".mp3":
+        shutil.copy2(item.audio_path, audio_path)
+      else:
+        cmd_ffmpeg = [
+          "ffmpeg", "-y", "-i", str(item.audio_path),
+          "-vn", "-acodec", "libmp3lame", "-q:a", "2",
+          str(audio_path)
+        ]
+        subprocess.run(cmd_ffmpeg, check=True, capture_output=True)
+      sample_status["media_downloaded"] = True
+      sample_status["audio_ready"] = True
+    except Exception as e:
+      sample_status["status"] = "download_failed"
+      sample_status["notes"].append(f"yt-dlp output normalize failed: {e}")
+      write_sample_status(video_dir, sample_status)
+      logger.error(f"外部作品归一化失败 {media_id}: {e}")
+      summary["failed"] += 1
+      continue
+
+    meta_text = (
+      f"## 视频信息\n"
+      f"标题：{item.title}\n"
+      f"作者：{item.uploader}\n"
+      f"视频ID：{item.media_id}\n"
+      f"来源：{item.webpage_url}\n\n"
+      f"## 数据\n"
+      f"播放：{item.info.get('view_count', 0)}\n"
+      f"点赞：{item.info.get('like_count', 0)}\n"
+      f"评论数：{item.info.get('comment_count', 0)}\n\n"
+    )
+    (video_dir / "meta.md").write_text(meta_text, encoding="utf-8")
+    (video_dir / "source.info.json").write_text(
+      json.dumps(item.info, ensure_ascii=False, indent=2) + "\n",
+      encoding="utf-8",
+    )
+    finalize_transcript(
+      audio_path,
+      video_dir,
+      sample_status,
+      skip_asr=skip_asr,
+      whisper_path=whisper_path,
+    )
+    write_sample_status(video_dir, sample_status)
+    if sample_status["status"] == "success":
+      summary["success"] += 1
+    else:
+      summary["failed"] += 1
+  return summary
+
+
+def print_list_probe(aweme_list: list[dict[str, Any]]) -> None:
+  print(json.dumps({
+    "count": len(aweme_list),
+    "aweme_ids": [
+      str(item.get("aweme_id") or item.get("video_id") or "")
+      for item in aweme_list
+    ],
+  }, ensure_ascii=False, indent=2))
+
 def main():
   parser = argparse.ArgumentParser(description="抖音视频/主页无水印极速解析与台词转录工具 (独立开源版)")
   parser.add_argument("--url", required=True, help="抖音视频分享链接 或 个人主页链接")
-  parser.add_argument("--count", type=int, default=3, help="抓取主页最近的视频数量")
+  parser.add_argument("--count", type=int, default=3, help="抓取主页最近的视频数量；0 或 --all 表示全量")
+  parser.add_argument("--all", action="store_true", help="下载博主主页全部可访问作品")
+  parser.add_argument(
+    "--backend",
+    choices=["auto", "f2", "yt-dlp", "legacy"],
+    default="auto",
+    help="抓取/下载后端。auto: 主页优先 F2，普通链接优先 yt-dlp",
+  )
   parser.add_argument("--account-name", default="", help="自定义博主文件夹命名")
   parser.add_argument("--output-dir", default="downloads", help="本地输出路径")
   parser.add_argument("--cookie", default="", help="直接传入 Cookie 字符串")
   parser.add_argument("--cookie-file", default="", help="读取本地 Cookie 的 txt 文件路径")
   parser.add_argument("--whisper-path", default="", help="可选：本地自定义 Whisper ASR 执行脚本路径")
+  parser.add_argument("--skip-asr", action="store_true", help="跳过 Whisper 转写，适合全量下载测试")
+  parser.add_argument("--keep-video", action="store_true", help="当需要下载视频再提取音频时保留 video.mp4")
+  parser.add_argument("--list-only", action="store_true", help="只拉取作品列表并打印 aweme_id，不下载媒体")
+  parser.add_argument("--no-install-f2", action="store_true", help="F2 不存在时不自动创建 .external/venv-f2")
   args = parser.parse_args()
 
   cookie_str = load_cookie(args.cookie, args.cookie_file)
@@ -483,10 +818,101 @@ def main():
 
   aweme_list = []
   nickname = args.account_name or "未命名账号"
+  count_limit = None if args.all or args.count <= 0 else args.count
+  effective_url = final_url or args.url
+
+  # 非抖音链接或显式 yt-dlp 后端：交给 yt-dlp，当前项目只做归一化与转写。
+  if args.backend == "yt-dlp" or (
+    args.backend == "auto" and not looks_like_douyin_url(effective_url)
+  ):
+    try:
+      ytdlp_items = run_ytdlp_audio(
+        url=args.url,
+        cookie_str=cookie_str,
+        use_douyin_cookie=looks_like_douyin_url(effective_url),
+      )
+      if args.list_only:
+        print(json.dumps({
+          "count": len(ytdlp_items),
+          "ids": [item.media_id for item in ytdlp_items],
+        }, ensure_ascii=False, indent=2))
+        return
+      summary = process_ytdlp_items(
+        ytdlp_items,
+        output_base=output_base,
+        whisper_path=args.whisper_path,
+        skip_asr=args.skip_asr,
+      )
+      logger.info(
+        "yt-dlp 后端完成：成功 %s / 跳过 %s / 失败 %s",
+        summary["success"], summary["skipped"], summary["failed"],
+      )
+      return
+    except ExternalBackendError as exc:
+      logger.error(f"yt-dlp 后端失败: {exc}")
+      sys.exit(1)
 
   if sec_user_id:
     # 情况 A：输入为主页链接
     logger.info(f"检测到主页分享链接 (sec_uid: {sec_user_id})")
+
+    if args.backend in ("auto", "f2"):
+      try:
+        logger.info("正在通过 F2 后端分页拉取主页作品列表...")
+        f2_result = fetch_user_posts_with_f2(
+          sec_user_id=sec_user_id,
+          count_limit=count_limit,
+          cookie_str=cookie_str,
+          user_agent=DEFAULT_USER_AGENT,
+          auto_install=not args.no_install_f2,
+        )
+        aweme_list = f2_result.aweme_list
+        logger.info(
+          "F2 后端拉取完成：%s 页，%s 个作品",
+          f2_result.pages,
+          len(aweme_list),
+        )
+        for aweme in aweme_list:
+          candidate = extract_author_nickname(aweme, "")
+          if candidate:
+            nickname = args.account_name or candidate
+            break
+
+        if args.list_only:
+          print_list_probe(aweme_list)
+          return
+
+        if not aweme_list:
+          logger.error("F2 后端未返回任何作品。请检查 Cookie 是否有效或稍后重试。")
+          sys.exit(1)
+
+        summary = process_aweme_list(
+          aweme_list,
+          nickname=nickname,
+          output_base=output_base,
+          cookie_str=cookie_str,
+          whisper_path=args.whisper_path,
+          skip_asr=args.skip_asr,
+          keep_video=args.keep_video,
+          source_path="f2",
+        )
+        logger.info(
+          "F2 后端任务结束：成功 %s / 跳过 %s / 失败 %s / 总计 %s",
+          summary["success"],
+          summary["skipped"],
+          summary["failed"],
+          len(aweme_list),
+        )
+        return
+      except ExternalBackendError as exc:
+        if args.backend == "f2" or args.all:
+          logger.error(f"F2 后端失败: {exc}")
+          sys.exit(1)
+        logger.warning(f"F2 后端不可用，回退 legacy 逻辑: {exc}")
+
+    if args.all:
+      logger.error("legacy 后端不支持 --all；请使用 --backend f2 或修复 F2 环境。")
+      sys.exit(1)
     
     # 1. 尝试使用公共/本地 API 接口拉取主页作品
     logger.info(f"正在通过 API 拉取该博主最近的 {args.count} 个作品列表...")
@@ -515,6 +941,10 @@ def main():
         logger.error("本地浏览器提取博主视频详情失败，结束处理。")
         sys.exit(1)
   else:
+    if args.backend == "f2":
+      logger.error("F2 后端当前仅用于博主主页作品分页；单视频请使用 auto/legacy/yt-dlp。")
+      sys.exit(1)
+
     # 情况 B：输入为单视频链接
     logger.info("按单视频分享链接进行本地免 Cookie HTML 解密...")
     video_id_match = re.search(r'video/(\d+)', final_url)
@@ -545,129 +975,27 @@ def main():
     logger.error("最终获取到的可用视频列表为空，结束处理。")
     sys.exit(1)
 
-  # 规范化博主命名的文件夹名称，防路径截断安全风险
-  account_folder = args.account_name if args.account_name else nickname
-  account_folder = re.sub(r'[\\/:*?"<>| ]', "_", account_folder)
+  if args.list_only:
+    print_list_probe(aweme_list)
+    return
 
-  logger.info(f"共获取到 {len(aweme_list)} 个作品，开始依次处理媒体提取与台词转写...")
-
-  for i, aweme in enumerate(aweme_list):
-    aweme_id = aweme.get("aweme_id") or aweme.get("video_id")
-    desc = aweme.get("desc") or "无标题"
-    stats = aweme.get("statistics", {})
-
-    # 优先使用音频原声下载链接
-    audio_url = ""
-    music_info = aweme.get("music", {})
-    if music_info and music_info.get("play_url"):
-      url_list = music_info["play_url"].get("url_list")
-      if url_list:
-        audio_url = url_list[0]
-      elif music_info["play_url"].get("uri"):
-        audio_url = music_info["play_url"]["uri"]
-
-    # 提取无水印视频地址以做音频转换兜底
-    video_url = ""
-    video_info = aweme.get("video", {})
-    if video_info and video_info.get("play_addr"):
-      v_url_list = video_info["play_addr"].get("url_list")
-      if v_url_list:
-        video_url = v_url_list[0].replace("playwm", "play")
-
-    video_dir = output_base / account_folder / aweme_id
-    video_dir.mkdir(parents=True, exist_ok=True)
-    audio_path = video_dir / "audio.mp3"
-
-    sample_status = {
-      "video_id": aweme_id,
-      "status": "metadata_only",
-      "metadata": True,
-      "media_downloaded": False,
-      "audio_ready": False,
-      "transcript_ready": False,
-      "source_path": "public-api-or-iesdouyin",
-      "notes": []
-    }
-
-    if not audio_url and not video_url:
-      logger.warning(f"视频ID {aweme_id} 缺少可用的播放资源链接，跳过")
-      sample_status["status"] = "download_failed"
-      sample_status["notes"].append("no media play url found")
-      write_sample_status(video_dir, sample_status)
-      continue
-
-    logger.info(f"[{i+1}/{len(aweme_list)}] 正在拉取作品: {aweme_id} | 标题: {desc[:15]}...")
-
-    # 自适应媒体流下载
-    if audio_url:
-      logger.info("拉取无水印音频流...")
-      try:
-        download_file(audio_url, audio_path, cookie_str)
-        sample_status["media_downloaded"] = True
-        sample_status["audio_ready"] = True
-      except Exception as e:
-        logger.error(f"音频文件下载失败: {e}")
-        sample_status["status"] = "download_failed"
-        sample_status["notes"].append(f"audio download failed: {e}")
-        write_sample_status(video_dir, sample_status)
-        continue
-    else:
-      logger.info("未发现直接音频流。正在极速抓取无水印视频并压制音轨...")
-      temp_video = video_dir / "temp_video.mp4"
-      try:
-        download_file(video_url, temp_video, cookie_str)
-        sample_status["media_downloaded"] = True
-        
-        # 运行 FFmpeg 提取音频
-        cmd_ffmpeg = [
-          "ffmpeg", "-y", "-i", str(temp_video),
-          "-vn", "-acodec", "libmp3lame", "-q:a", "2",
-          str(audio_path)
-        ]
-        subprocess.run(cmd_ffmpeg, check=True, capture_output=True)
-        sample_status["audio_ready"] = True
-        logger.info("FFmpeg 音轨转码成功！")
-      except Exception as e:
-        logger.error(f"媒体流抓取或转码发生异常: {e}")
-        sample_status["status"] = "download_failed"
-        sample_status["notes"].append(f"ffmpeg extract audio failed: {e}")
-        write_sample_status(video_dir, sample_status)
-        continue
-      finally:
-        if temp_video.is_file():
-          temp_video.unlink()
-
-    # 格式化数据指标并写入 meta.md
-    raw_play = stats.get("play_count", 0)
-    play_w = round(raw_play / 10000.0, 2) if raw_play > 0 else 0.0
-    meta_text = (
-      f"## 视频信息\n"
-      f"标题：{desc}\n"
-      f"作者：{nickname}\n"
-      f"视频ID：{aweme_id}\n\n"
-      f"## 数据\n"
-      f"播放：{play_w}w\n"
-      f"点赞：{stats.get('digg_count', 0)}\n"
-      f"评论数：{stats.get('comment_count', 0)}\n"
-      f"转发数：{stats.get('share_count', 0)}\n\n"
-    )
-    (video_dir / "meta.md").write_text(meta_text, encoding="utf-8")
-
-    # ASR 唤醒转写文案
-    asr_success = run_whisper_transcription(audio_path, video_dir, args.whisper_path)
-    if asr_success:
-      sample_status["transcript_ready"] = True
-      sample_status["status"] = "success"
-      logger.info("语音识别成功生成 transcript.md")
-    else:
-      (video_dir / "transcript.md").write_text("N/A", encoding="utf-8")
-      sample_status["status"] = "asr_failed"
-      sample_status["notes"].append("whisper command line failed or skipped")
-      logger.warning("语音识别失败或跳过，已写入空占位文件。")
-
-    write_sample_status(video_dir, sample_status)
-
-  logger.info("任务结束！所有下载与解析数据已放置在指定的输出目录中。")
+  summary = process_aweme_list(
+    aweme_list,
+    nickname=nickname,
+    output_base=output_base,
+    cookie_str=cookie_str,
+    whisper_path=args.whisper_path,
+    skip_asr=args.skip_asr,
+    keep_video=args.keep_video,
+    source_path="legacy",
+  )
+  logger.info(
+    "任务结束：成功 %s / 跳过 %s / 失败 %s / 总计 %s",
+    summary["success"],
+    summary["skipped"],
+    summary["failed"],
+    len(aweme_list),
+  )
 
 if __name__ == "__main__":
   main()

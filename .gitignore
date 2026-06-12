@@ -9,6 +9,7 @@ temp_video.mp4
 # 用户敏感凭据
 cookie.txt
 .auth/
+.external/
 
 # macOS 系统残留
 .DS_Store
