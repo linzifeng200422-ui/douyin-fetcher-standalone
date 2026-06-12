@@ -154,11 +154,63 @@ def fetch_single_video_details(video_id: str, cookie_str: str = "") -> dict | No
     return None
 
 
-def scrape_user_videos_via_browser(sec_user_id: str, count: int) -> tuple[list[str], str]:
+def fetch_single_video_details_via_browser(video_id: str) -> dict | None:
   """
-  使用 Playwright 本地浏览器访问博主主页，通过加载 state.json 状态恢复登录态，
-  然后向下滚动以动态加载并收集足够数量 of 视频 ID，同时获取博主昵称。
-  返回: (video_ids_list, nickname)
+  使用 Playwright 本地浏览器打开单视频详情页，在浏览器加载时拦截其详情 API，
+  直接获取与 API 原格式兼容的 aweme_detail 数据对象。
+  """
+  try:
+    from playwright.sync_api import sync_playwright
+  except ImportError:
+    logger.error("未检测到 playwright 库。请先安装: pip install playwright && playwright install chromium")
+    return None
+
+  state_file = Path(".auth/state.json")
+  detail_url = f"https://www.douyin.com/video/{video_id}"
+  logger.info(f"启动 Playwright 本地浏览器解析单视频: {detail_url}")
+
+  detail_data = None
+  with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+    if state_file.is_file():
+      context = browser.new_context(
+        storage_state=str(state_file),
+        user_agent=DEFAULT_USER_AGENT,
+        viewport={"width": 1440, "height": 900}
+      )
+    else:
+      context = browser.new_context(
+        user_agent=DEFAULT_USER_AGENT,
+        viewport={"width": 1440, "height": 900}
+      )
+
+    page = context.new_page()
+    try:
+      def expect_detail_filter(r):
+        return "aweme/v1/web/aweme/detail" in r.url and r.status == 200
+
+      with page.expect_response(expect_detail_filter, timeout=25000) as response_info:
+        page.goto(detail_url, wait_until="load")
+      
+      response = response_info.value
+      page.wait_for_timeout(800) # 等待网络数据完全传输完毕以防 Protocol error
+      body = response.body()
+      res_json = json.loads(body.decode("utf-8"))
+      detail_data = res_json.get("aweme_detail")
+    except Exception as ex:
+      logger.error(f"在浏览器中拦截视频 {video_id} 详情 API 失败: {ex}")
+      
+    context.close()
+    browser.close()
+    
+  return detail_data
+
+
+def scrape_user_videos_via_browser(sec_user_id: str, count: int) -> tuple[list[dict], str]:
+  """
+  使用 Playwright 本地浏览器访问博主主页，提取视频 ID 列表；
+  然后复用同一个浏览器会话，遍历这些视频 ID，通过网络拦截 /aweme/v1/web/aweme/detail/ 接口，
+  还原出与 API 兼容的 aweme_detail 数据结构。
   """
   try:
     from playwright.sync_api import sync_playwright
@@ -166,19 +218,17 @@ def scrape_user_videos_via_browser(sec_user_id: str, count: int) -> tuple[list[s
     logger.error("未检测到 playwright 库。请先安装: pip install playwright && playwright install chromium")
     return [], "未命名账号"
 
-  video_ids = []
+  aweme_details = []
   nickname = "未命名账号"
   user_page_url = f"https://www.douyin.com/user/{sec_user_id}"
-  
-  logger.info(f"启动 Playwright 本地浏览器抓取主页: {user_page_url}")
-  
   state_file = Path(".auth/state.json")
-  
+
+  logger.info(f"启动 Playwright 本地浏览器抓取主页: {user_page_url}")
+
   with sync_playwright() as p:
-    # 启动 Chromium
     browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
     
-    # 尝试加载登录态 state.json 以免锁 context 目录
+    # 使用 state.json 恢复登录态
     if state_file.is_file():
       logger.info(f"正在读取 {state_file.name} 恢复登录态...")
       context = browser.new_context(
@@ -187,19 +237,20 @@ def scrape_user_videos_via_browser(sec_user_id: str, count: int) -> tuple[list[s
         viewport={"width": 1440, "height": 900}
       )
     else:
-      logger.warning("未检测到登录状态 state.json 文件，将以游客身份访问主页。")
+      logger.warning("未检测到登录状态 state.json 文件，将以游客身份访问。")
       context = browser.new_context(
         user_agent=DEFAULT_USER_AGENT,
         viewport={"width": 1440, "height": 900}
       )
-      
+
     page = context.new_page()
     
+    # 访问主页
     try:
       page.goto(user_page_url, wait_until="domcontentloaded", timeout=45000)
     except Exception as e:
-      logger.warning(f"页面加载发生超时或异常，尝试继续解析: {e}")
-      
+      logger.warning(f"主页加载超时或异常，尝试继续解析: {e}")
+
     # 获取博主昵称
     try:
       title = page.title()
@@ -212,21 +263,20 @@ def scrape_user_videos_via_browser(sec_user_id: str, count: int) -> tuple[list[s
       logger.info(f"解析到博主昵称: {nickname}")
     except Exception as ne:
       logger.warning(f"获取博主昵称异常: {ne}")
-      
-    # 向下滚动以动态加载视频
+
+    # 滚动收集视频 ID
+    video_ids = []
     last_count = 0
     no_change_scrolls = 0
-    max_scrolls = 20 # 最多滚动 20 次防死循环
-    
+    max_scrolls = 20
+
     for scroll in range(max_scrolls):
-      # 获取当前所有视频 a 标签的 href
       try:
         locators = page.locator("a[href*='/video/']")
         elem_count = locators.count()
       except Exception:
         elem_count = 0
-        
-      # 提取当前所有存在的视频 ID
+
       current_ids = []
       for idx in range(elem_count):
         try:
@@ -237,40 +287,66 @@ def scrape_user_videos_via_browser(sec_user_id: str, count: int) -> tuple[list[s
               current_ids.append(match.group(1))
         except Exception:
           continue
-          
-      # 去重保留顺序
+
       for vid in current_ids:
         if vid not in video_ids:
           video_ids.append(vid)
-          
+
       logger.info(f"第 {scroll+1} 次滚动: 当前已获取到 {len(video_ids)} 个视频 ID (目标: {count})")
-      
       if len(video_ids) >= count:
         break
-        
-      # 判断是否已经无法滚动加载更多
+
       if len(video_ids) == last_count:
         no_change_scrolls += 1
         if no_change_scrolls >= 4:
-          logger.info("连续多次滚动视频数量无增长，判定已触底。")
+          logger.info("滚动视频无增长，判定已触底。")
           break
       else:
         no_change_scrolls = 0
-        
+
       last_count = len(video_ids)
-      
-      # 模拟向下滚动滚动条
+
       try:
         page.evaluate("window.scrollBy(0, 1000)")
-        page.wait_for_timeout(1500) # 等待 1.5 秒加载
+        page.wait_for_timeout(1500)
       except Exception:
         break
+
+    # 截取目标数量
+    target_vids = video_ids[:count]
+    logger.info(f"✓ 主页视频 ID 提取完毕，准备依次拦截解析以下 {len(target_vids)} 个视频的详情: {target_vids}")
+
+    # 依次解析详情
+    for vid in target_vids:
+      detail_url = f"https://www.douyin.com/video/{vid}"
+      logger.info(f"正在浏览器中加载并解析视频详情: {vid}")
+      
+      detail_data = None
+      try:
+        def expect_detail_filter(r):
+          return "aweme/v1/web/aweme/detail" in r.url and r.status == 200
+
+        with page.expect_response(expect_detail_filter, timeout=25000) as response_info:
+          page.goto(detail_url, wait_until="load")
         
+        response = response_info.value
+        page.wait_for_timeout(800) # 等待网络数据完全传输完毕以防 Protocol error
+        body = response.body()
+        res_json = json.loads(body.decode("utf-8"))
+        detail_data = res_json.get("aweme_detail")
+      except Exception as ex:
+        logger.error(f"拦截视频 {vid} 详情 API 失败: {ex}")
+        
+      if detail_data:
+        aweme_details.append(detail_data)
+        logger.info(f"✓ 成功捕获视频 {vid} 详情")
+      else:
+        logger.warning(f"未能捕获视频 {vid} 的详情，已跳过")
+
     context.close()
     browser.close()
-    
-  # 返回前截断到指定数量
-  return video_ids[:count], nickname
+
+  return aweme_details, nickname
 
 def download_file(url: str, dest_path: Path, cookie: str = ""):
   """
@@ -412,7 +488,6 @@ def main():
     # 情况 A：输入为主页链接
     logger.info(f"检测到主页分享链接 (sec_uid: {sec_user_id})")
     
-    post_vids = []
     # 1. 尝试使用公共/本地 API 接口拉取主页作品
     logger.info(f"正在通过 API 拉取该博主最近的 {args.count} 个作品列表...")
     res_posts = fetch_user_posts(sec_user_id, args.count, cookie_str)
@@ -427,28 +502,18 @@ def main():
           nickname = author.get("nickname")
           break
     else:
-      # 2. 如果 API 被拦截或失败，使用 Playwright 浏览器 DOM 提取器兜底
-      logger.warning("API 拉取主页失败，正在启动本地浏览器 DOM 提取器兜底...")
-      browser_vids, scraped_nickname = scrape_user_videos_via_browser(sec_user_id, args.count)
+      # 2. 如果 API 被拦截或失败，使用 Playwright 浏览器 DOM 提取与 API 拦截兜底
+      logger.warning("API 拉取主页失败，正在启动本地浏览器 DOM 提取与 API 拦截兜底...")
+      browser_details, scraped_nickname = scrape_user_videos_via_browser(sec_user_id, args.count)
       if scraped_nickname and scraped_nickname != "未命名账号":
         nickname = scraped_nickname
         
-      if browser_vids:
-        logger.info(f"✓ 通过本地浏览器成功提取到 {len(browser_vids)} 个视频 ID。开始逐个获取视频详情...")
-        post_vids = browser_vids
+      if browser_details:
+        logger.info(f"✓ 通过本地浏览器成功提取并拦截解析了 {len(browser_details)} 个视频的详情")
+        aweme_list = browser_details
       else:
-        logger.error("本地浏览器提取博主视频 ID 失败，结束处理。")
+        logger.error("本地浏览器提取博主视频详情失败，结束处理。")
         sys.exit(1)
-        
-    # 3. 对于从浏览器中提取的视频 ID，通过本地 HTML 还原数据结构
-    if post_vids:
-      for vid in post_vids:
-        logger.info(f"正在获取视频详情: {vid}")
-        video_data = fetch_single_video_details(vid, cookie_str)
-        if video_data:
-          aweme_list.append(video_data)
-        else:
-          logger.warning(f"视频 {vid} 详情解析失败，已跳过")
   else:
     # 情况 B：输入为单视频链接
     logger.info("按单视频分享链接进行本地免 Cookie HTML 解密...")
@@ -463,7 +528,12 @@ def main():
     video_id = video_id_match.group(1)
     logger.info(f"成功提取视频 ID: {video_id}。开始解析详情...")
     
+    # 优先尝试免 Cookie HTML 解密
     video_data = fetch_single_video_details(video_id, cookie_str)
+    if not video_data:
+      logger.warning("通过免 Cookie HTML 解密单视频失败，尝试使用本地浏览器拦截解析...")
+      video_data = fetch_single_video_details_via_browser(video_id)
+      
     if video_data:
       aweme_list = [video_data]
       nickname = video_data.get("author", {}).get("nickname") or video_data.get("nickname") or "未命名账号"
