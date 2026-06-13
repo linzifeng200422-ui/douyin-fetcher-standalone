@@ -3,6 +3,7 @@ import json
 from douyin_parser import (
     collection_incomplete_reason,
     collection_target_count,
+    get_aweme_media_selection,
     is_completed_video_dir,
     merge_aweme_lists_by_id,
 )
@@ -67,3 +68,79 @@ def test_cookie_login_detection_rejects_visitor_cookie():
     assert has_login_cookie([
         {"name": "sessionid_ss", "value": "logged-in"},
     ])
+
+
+def test_media_selection_prefers_original_landscape_ratio():
+    aweme = {
+        "video": {
+            "width": 1440,
+            "height": 1080,
+            "play_addr": {
+                "url_list": ["https://example.test/vertical.mp4"],
+                "width": 1080,
+                "height": 1920,
+                "data_size": 1000,
+            },
+            "bit_rate": [
+                {
+                    "format": "mp4",
+                    "bit_rate": 100,
+                    "play_addr": {
+                        "url_list": ["https://example.test/landscape.mp4"],
+                        "width": 1440,
+                        "height": 1080,
+                        "data_size": 900,
+                    },
+                }
+            ],
+        }
+    }
+
+    selection = get_aweme_media_selection(aweme)
+
+    assert selection["video_url"] == "https://example.test/landscape.mp4"
+    assert selection["video_selection"]["width"] == 1440
+    assert selection["video_selection"]["height"] == 1080
+
+
+def test_media_selection_prefers_exact_original_resolution_over_default_play_addr():
+    aweme = {
+        "video": {
+            "width": 1438,
+            "height": 2556,
+            "play_addr": {
+                "url_list": ["https://example.test/default-1080.mp4"],
+                "width": 1080,
+                "height": 1920,
+                "data_size": 5000,
+            },
+            "bit_rate": [
+                {
+                    "format": "mp4",
+                    "bit_rate": 574153,
+                    "play_addr": {
+                        "url_list": ["https://example.test/default-1080.mp4"],
+                        "width": 1080,
+                        "height": 1920,
+                        "data_size": 5222789,
+                    },
+                },
+                {
+                    "format": "mp4",
+                    "bit_rate": 373557,
+                    "play_addr": {
+                        "url_list": ["https://example.test/original-1438.mp4"],
+                        "width": 1438,
+                        "height": 2556,
+                        "data_size": 3398062,
+                    },
+                },
+            ],
+        }
+    }
+
+    selection = get_aweme_media_selection(aweme)
+
+    assert selection["video_url"] == "https://example.test/original-1438.mp4"
+    assert selection["video_selection"]["width"] == 1438
+    assert selection["video_selection"]["height"] == 2556

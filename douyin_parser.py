@@ -868,6 +868,44 @@ def is_completed_video_dir(video_dir: Path) -> bool:
   return status.get("status") == "success"
 
 
+def probe_video_dimensions(video_path: Path) -> tuple[int, int] | None:
+  if not video_path.is_file():
+    return None
+  cmd = [
+    "ffprobe",
+    "-v", "error",
+    "-select_streams", "v:0",
+    "-show_entries", "stream=width,height",
+    "-of", "csv=p=0:s=x",
+    str(video_path),
+  ]
+  try:
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+  except Exception:
+    return None
+  if result.returncode != 0:
+    return None
+  text = (result.stdout or "").strip().splitlines()
+  if not text:
+    return None
+  match = re.search(r"(\d+)x(\d+)", text[0])
+  if not match:
+    return None
+  return int(match.group(1)), int(match.group(2))
+
+
+def completed_video_matches_selection(video_dir: Path, video_selection: dict[str, Any]) -> bool:
+  expected_width = safe_int(video_selection.get("width"))
+  expected_height = safe_int(video_selection.get("height"))
+  if not expected_width or not expected_height:
+    return True
+  actual = probe_video_dimensions(video_dir / "video.mp4")
+  if not actual:
+    return True
+  actual_width, actual_height = actual
+  return abs(actual_width - expected_width) <= 2 and abs(actual_height - expected_height) <= 2
+
+
 def extract_author_nickname(aweme: dict[str, Any], default: str = "未命名账号") -> str:
   author = aweme.get("author") if isinstance(aweme.get("author"), dict) else {}
   return (
@@ -878,7 +916,131 @@ def extract_author_nickname(aweme: dict[str, Any], default: str = "未命名账�
   )
 
 
-def get_aweme_media_urls(aweme: dict[str, Any]) -> tuple[str, str]:
+def safe_int(value: Any, default: int = 0) -> int:
+  try:
+    return int(value)
+  except (TypeError, ValueError):
+    return default
+
+
+def first_url_from_addr(addr: dict[str, Any]) -> str:
+  url_list = addr.get("url_list")
+  if isinstance(url_list, list):
+    for url in url_list:
+      if isinstance(url, str) and url.strip():
+        return url.strip().replace("playwm", "play")
+  uri = addr.get("uri")
+  if isinstance(uri, str) and uri.startswith("http"):
+    return uri.strip().replace("playwm", "play")
+  return ""
+
+
+def add_video_candidate(
+  candidates: list[dict[str, Any]],
+  addr: Any,
+  *,
+  source: str,
+  rank: int,
+  bit_rate_info: dict[str, Any] | None = None,
+) -> None:
+  if not isinstance(addr, dict):
+    return
+  url = first_url_from_addr(addr)
+  if not url:
+    return
+  bit_rate_info = bit_rate_info or {}
+  width = safe_int(addr.get("width")) or safe_int(bit_rate_info.get("width"))
+  height = safe_int(addr.get("height")) or safe_int(bit_rate_info.get("height"))
+  data_size = safe_int(addr.get("data_size")) or safe_int(bit_rate_info.get("data_size"))
+  bit_rate = safe_int(bit_rate_info.get("bit_rate"))
+  candidate = {
+    "url": url,
+    "source": source,
+    "rank": rank,
+    "width": width,
+    "height": height,
+    "data_size": data_size,
+    "bit_rate": bit_rate,
+    "format": bit_rate_info.get("format") or "",
+    "gear_name": bit_rate_info.get("gear_name") or "",
+    "quality_type": bit_rate_info.get("quality_type"),
+  }
+  key = (candidate["url"], candidate["width"], candidate["height"], candidate["source"])
+  for existing in candidates:
+    existing_key = (
+      existing.get("url"),
+      existing.get("width"),
+      existing.get("height"),
+      existing.get("source"),
+    )
+    if existing_key == key:
+      return
+  candidates.append(candidate)
+
+
+def select_best_video_candidate(video_info: dict[str, Any]) -> dict[str, Any]:
+  candidates: list[dict[str, Any]] = []
+  bit_rate = video_info.get("bit_rate")
+  if isinstance(bit_rate, list):
+    for index, item in enumerate(bit_rate):
+      if not isinstance(item, dict):
+        continue
+      add_video_candidate(
+        candidates,
+        item.get("play_addr"),
+        source=f"bit_rate[{index}].play_addr",
+        rank=index,
+        bit_rate_info=item,
+      )
+
+  fallback_keys = [
+    "play_addr_h264",
+    "play_addr",
+    "play_addr_bytevc1",
+    "play_addr_265",
+    "play_addr_lowbr",
+    "download_addr",
+  ]
+  for offset, key in enumerate(fallback_keys, start=1000):
+    add_video_candidate(candidates, video_info.get(key), source=key, rank=offset)
+
+  if not candidates:
+    return {}
+
+  target_width = safe_int(video_info.get("width"))
+  target_height = safe_int(video_info.get("height"))
+  target_ratio = target_width / target_height if target_width and target_height else 0.0
+
+  def score(candidate: dict[str, Any]) -> tuple[float, int, int, int, int]:
+    width = safe_int(candidate.get("width"))
+    height = safe_int(candidate.get("height"))
+    area = width * height
+    candidate_ratio = width / height if width and height else 0.0
+    if target_ratio and candidate_ratio:
+      ratio_penalty = abs(candidate_ratio - target_ratio) / target_ratio
+    else:
+      ratio_penalty = 1.0
+    # 原始比例优先，其次是分辨率和码率。mp4 优先于 dash，便于直接落盘。
+    ratio_score = max(0.0, 1.0 - min(ratio_penalty, 1.0))
+    format_score = 1 if str(candidate.get("format") or "").lower() == "mp4" else 0
+    source_score = 1 if str(candidate.get("source") or "").startswith("bit_rate[") else 0
+    return (
+      ratio_score,
+      area,
+      safe_int(candidate.get("bit_rate")),
+      safe_int(candidate.get("data_size")),
+      format_score + source_score,
+    )
+
+  selected = max(candidates, key=score)
+  selected = dict(selected)
+  selected["target_width"] = target_width
+  selected["target_height"] = target_height
+  selected["candidate_count"] = len(candidates)
+  return selected
+
+
+def get_aweme_media_selection(aweme: dict[str, Any]) -> dict[str, Any]:
   audio_url = ""
   music_info = aweme.get("music", {})
   if isinstance(music_info, dict) and music_info.get("play_url"):
@@ -890,23 +1052,25 @@ def get_aweme_media_urls(aweme: dict[str, Any]) -> tuple[str, str]:
       elif play_url.get("uri"):
         audio_url = play_url["uri"]
 
-  video_url = ""
+  video_selection: dict[str, Any] = {}
   video_info = aweme.get("video", {})
   if isinstance(video_info, dict):
-    play_addr = video_info.get("play_addr") or video_info.get("play_addr_h264")
-    if isinstance(play_addr, dict):
-      v_url_list = play_addr.get("url_list")
-      if v_url_list:
-        video_url = v_url_list[0].replace("playwm", "play")
-    bit_rate = video_info.get("bit_rate")
-    if not video_url and isinstance(bit_rate, list) and bit_rate:
-      first_rate = bit_rate[0]
-      if isinstance(first_rate, dict):
-        br_play_addr = first_rate.get("play_addr")
-        if isinstance(br_play_addr, dict) and br_play_addr.get("url_list"):
-          video_url = br_play_addr["url_list"][0].replace("playwm", "play")
+    video_selection = select_best_video_candidate(video_info)
 
-  return audio_url, video_url
+  return {
+    "audio_url": audio_url,
+    "video_url": video_selection.get("url", ""),
+    "video_selection": {
+      key: value
+      for key, value in video_selection.items()
+      if key != "url"
+    },
+  }
+
+
+def get_aweme_media_urls(aweme: dict[str, Any]) -> tuple[str, str]:
+  selection = get_aweme_media_selection(aweme)
+  return selection["audio_url"], selection["video_url"]
 
 
 def write_meta_file(video_dir: Path, aweme: dict[str, Any], nickname: str) -> None:
@@ -999,11 +1163,22 @@ def process_aweme_list(
     video_dir.mkdir(parents=True, exist_ok=True)
     audio_path = video_dir / "audio.mp3"
     video_path = video_dir / "video.mp4"
+    media_selection = get_aweme_media_selection(aweme)
+    audio_url = media_selection["audio_url"]
+    video_url = media_selection["video_url"]
+    video_selection = media_selection["video_selection"]
 
     if is_completed_video_dir(video_dir):
-      logger.info(f"[{i+1}/{len(aweme_list)}] 跳过已完成作品: {aweme_id}")
-      stats_summary["skipped"] += 1
-      continue
+      if completed_video_matches_selection(video_dir, video_selection):
+        logger.info(f"[{i+1}/{len(aweme_list)}] 跳过已完成作品: {aweme_id}")
+        stats_summary["skipped"] += 1
+        continue
+      logger.warning(
+        "[%s/%s] 已完成作品的视频尺寸不匹配当前最佳流，重新下载修复: %s",
+        i + 1,
+        len(aweme_list),
+        aweme_id,
+      )
 
     sample_status = {
       "video_id": aweme_id,
@@ -1014,11 +1189,11 @@ def process_aweme_list(
       "video_ready": False,
       "transcript_ready": False,
       "source_path": source_path,
+      "video_selection": video_selection,
       "notes": []
     }
     write_sample_status(video_dir, sample_status)
 
-    audio_url, video_url = get_aweme_media_urls(aweme)
     if not video_url:
       logger.warning(f"视频ID {aweme_id} 缺少可用的视频播放资源链接，跳过")
       sample_status["status"] = "download_failed"
