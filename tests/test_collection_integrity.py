@@ -104,6 +104,39 @@ def test_media_selection_prefers_original_landscape_ratio():
     assert selection["video_selection"]["height"] == 1080
 
 
+def test_media_selection_uses_video_dimensions_for_outer_play_addr():
+    aweme = {
+        "video": {
+            "width": 1920,
+            "height": 1080,
+            "play_addr": {
+                "url_list": ["https://example.test/outer-no-dimensions.mp4"],
+                "data_size": 900,
+            },
+            "bit_rate": [
+                {
+                    "format": "mp4",
+                    "gear_name": "normal_1080_0",
+                    "quality_type": 1,
+                    "bit_rate": 900000,
+                    "play_addr": {
+                        "url_list": ["https://example.test/cropped-portrait.mp4"],
+                        "width": 1080,
+                        "height": 1920,
+                        "data_size": 5000,
+                    },
+                }
+            ],
+        }
+    }
+
+    selection = get_aweme_media_selection(aweme)
+
+    assert selection["video_url"] == "https://example.test/outer-no-dimensions.mp4"
+    assert selection["video_selection"]["width"] == 1920
+    assert selection["video_selection"]["height"] == 1080
+
+
 def test_media_selection_balanced_prefers_clearer_bitrate_over_lowest_1440():
     aweme = {
         "video": {
@@ -291,12 +324,13 @@ def test_dy_downloader_config_keeps_cookie_out_of_temp_config(tmp_path):
     assert config["number"]["post"] == 0
     assert config["thread"] == 3
     assert config["video_quality"] == "1440p"
+    assert config["download_pinned"] is True
     assert "cookie" not in config
     assert "cookies" not in config
 
 
 def test_dy_downloader_quality_mapping():
-    assert dy_downloader_quality("balanced") == "highest"
+    assert dy_downloader_quality("balanced") == "1440p"
     assert dy_downloader_quality("bitrate") == "highest"
     assert dy_downloader_quality("resolution") == "1440p"
     assert dy_downloader_quality("h264") == "1080p"

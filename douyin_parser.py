@@ -949,6 +949,8 @@ def add_video_candidate(
   source: str,
   rank: int,
   bit_rate_info: dict[str, Any] | None = None,
+  default_width: int = 0,
+  default_height: int = 0,
 ) -> None:
   if not isinstance(addr, dict):
     return
@@ -956,8 +958,16 @@ def add_video_candidate(
   if not url:
     return
   bit_rate_info = bit_rate_info or {}
-  width = safe_int(addr.get("width")) or safe_int(bit_rate_info.get("width"))
-  height = safe_int(addr.get("height")) or safe_int(bit_rate_info.get("height"))
+  width = (
+    safe_int(addr.get("width"))
+    or safe_int(bit_rate_info.get("width"))
+    or safe_int(default_width)
+  )
+  height = (
+    safe_int(addr.get("height"))
+    or safe_int(bit_rate_info.get("height"))
+    or safe_int(default_height)
+  )
   data_size = safe_int(addr.get("data_size")) or safe_int(bit_rate_info.get("data_size"))
   bit_rate = safe_int(bit_rate_info.get("bit_rate"))
   candidate = {
@@ -1010,6 +1020,8 @@ def select_best_video_candidate(
   video_orientation: str = "auto",
 ) -> dict[str, Any]:
   candidates: list[dict[str, Any]] = []
+  target_width = safe_int(video_info.get("width"))
+  target_height = safe_int(video_info.get("height"))
   bit_rate = video_info.get("bit_rate")
   if isinstance(bit_rate, list):
     for index, item in enumerate(bit_rate):
@@ -1032,7 +1044,14 @@ def select_best_video_candidate(
     "download_addr",
   ]
   for offset, key in enumerate(fallback_keys, start=1000):
-    add_video_candidate(candidates, video_info.get(key), source=key, rank=offset)
+    add_video_candidate(
+      candidates,
+      video_info.get(key),
+      source=key,
+      rank=offset,
+      default_width=target_width,
+      default_height=target_height,
+    )
 
   if not candidates:
     return {}
@@ -1052,8 +1071,6 @@ def select_best_video_candidate(
     if not candidates:
       return {}
 
-  target_width = safe_int(video_info.get("width"))
-  target_height = safe_int(video_info.get("height"))
   target_ratio = target_width / target_height if target_width and target_height else 0.0
 
   def score(candidate: dict[str, Any]) -> tuple[float, int, int, int, int, int, int]:
