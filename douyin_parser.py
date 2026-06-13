@@ -634,6 +634,10 @@ def scrape_user_posts_via_browser_fallback(
         aweme_id = str(item.get("aweme_id") or item.get("video_id") or "").strip()
         if not aweme_id:
           continue
+        author = item.get("author") if isinstance(item.get("author"), dict) else {}
+        item_sec_uid = str(author.get("sec_uid") or "").strip()
+        if sec_user_id and item_sec_uid and item_sec_uid != sec_user_id:
+          continue
         extracted_ids.append(aweme_id)
         post_aweme_by_id[aweme_id] = item
       merge_ids(extracted_ids)
@@ -709,7 +713,7 @@ def scrape_user_posts_via_browser_fallback(
       before = len(id_order) + len(post_aweme_by_id)
       merge_ids(extract_aweme_ids_from_page(page))
       logger.info(
-        "浏览器兜底滚动 %s/%s：ID=%s，带详情=%s，目标=%s",
+        "浏览器兜底滚动 %s/%s：裸ID=%s，带详情=%s，目标=%s",
         scroll_index + 1,
         max_scrolls,
         len(id_order),
@@ -759,7 +763,7 @@ def scrape_user_posts_via_browser_fallback(
       browser_items.append(item)
 
   logger.warning(
-    "浏览器兜底采集结束：主页接口页数=%s，ID=%s，完整元数据=%s，login_tip=%s，verify=%s",
+    "浏览器兜底采集结束：主页接口页数=%s，裸ID=%s，完整元数据=%s，login_tip=%s，verify=%s",
     post_api_pages,
     len(id_order),
     len(browser_items),
@@ -1778,6 +1782,7 @@ def main():
               "backend": "browser_fallback",
               "items": len(browser_items),
               "ids": len(browser_ids),
+              "bare_ids": len(browser_ids),
             })
             if args.detail_fill and browser_ids:
               existing_ids = {
@@ -1816,9 +1821,13 @@ def main():
                   "error_items": detail_result.errors[:20],
                 })
             if count_limit is None and browser_ids:
+              # Browser DOM extraction is intentionally broad.  Treat bare IDs
+              # only as detail-fill hints; total validation must use confirmed
+              # metadata so recommended/related videos do not inflate counts.
               validation_expected_count = max(
                 _coerce_positive_int(f2_result.expected_count) or 0,
-                len(browser_ids),
+                len(aweme_list),
+                len(browser_items),
               )
             incomplete_reason = collection_incomplete_reason(
               len(aweme_list),
