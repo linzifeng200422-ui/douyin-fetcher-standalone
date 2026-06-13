@@ -295,11 +295,13 @@ def run_supervised(
 
 
 def dy_downloader_quality(video_quality: str) -> str:
-  if video_quality == "resolution":
+  if video_quality in ("balanced", "resolution"):
     return "1440p"
+  if video_quality == "bitrate":
+    return "highest"
   if video_quality == "h264":
     return "1080p"
-  return "highest"
+  return "1440p"
 
 
 def build_dy_downloader_config(
@@ -322,7 +324,7 @@ def build_dy_downloader_config(
     "filename_template": "{id}",
     "folder_template": "{id}",
     "author_dir": "nickname_uid",
-    "download_pinned": False,
+    "download_pinned": True,
     "mode": ["post"],
     "number": {
       "post": post_count,

@@ -535,6 +535,7 @@ def scrape_user_posts_via_browser_fallback(
   cookie_str: str,
   expected_count: int | None,
   count_limit: int | None,
+  trust_expected_count: bool = True,
   headless: bool,
   max_scrolls: int,
   idle_rounds: int,
@@ -547,7 +548,10 @@ def scrape_user_posts_via_browser_fallback(
     logger.error("未检测到 playwright 库。请先安装: pip install playwright && playwright install chromium")
     return [], "", []
 
-  target = collection_target_count(expected_count, count_limit)
+  target = collection_target_count(
+    expected_count if trust_expected_count else None,
+    count_limit,
+  )
   target_url = f"https://www.douyin.com/user/{sec_user_id}"
   state_file = Path(".auth/state.json")
   post_aweme_by_id: dict[str, dict[str, Any]] = {}
@@ -1715,21 +1719,30 @@ def main():
           logger.warning("抖音接口返回登录提示：当前 Cookie 可能是游客态或登录态不足。")
         if cookie_str and not cookie_header_has_login(cookie_str):
           logger.warning("本地 cookie.txt 未发现 sessionid/sessionid_ss/sid_guard 等登录态 Cookie。")
+        validation_expected_count = f2_result.expected_count
         incomplete_reason = collection_incomplete_reason(
           len(aweme_list),
-          expected_count=f2_result.expected_count,
+          expected_count=validation_expected_count,
           count_limit=count_limit,
           has_more=f2_result.has_more,
         )
 
+        should_verify_all_with_browser = count_limit is None and args.browser_fallback
         if incomplete_reason:
           logger.warning("F2 作品列表不完整：%s", incomplete_reason)
-          if args.browser_fallback:
+        elif should_verify_all_with_browser:
+          logger.warning(
+            "全量模式将启动浏览器滚动复核，不再只信任接口返回的作品总数=%s。",
+            f2_result.expected_count,
+          )
+
+        if args.browser_fallback and (incomplete_reason or should_verify_all_with_browser):
             browser_items, browser_nickname, browser_ids = scrape_user_posts_via_browser_fallback(
               sec_user_id,
               cookie_str=cookie_str,
               expected_count=f2_result.expected_count,
               count_limit=count_limit,
+              trust_expected_count=not should_verify_all_with_browser,
               headless=args.browser_headless,
               max_scrolls=args.browser_max_scrolls,
               idle_rounds=args.browser_idle_rounds,
@@ -1783,9 +1796,14 @@ def main():
                   "items": len(detail_result.aweme_list),
                   "errors": len(detail_result.errors),
                 })
+            if count_limit is None and browser_ids:
+              validation_expected_count = max(
+                _coerce_positive_int(f2_result.expected_count) or 0,
+                len(browser_ids),
+              )
             incomplete_reason = collection_incomplete_reason(
               len(aweme_list),
-              expected_count=f2_result.expected_count,
+              expected_count=validation_expected_count,
               count_limit=count_limit,
               has_more=False,
             )
@@ -1794,7 +1812,7 @@ def main():
           print_list_probe(
             aweme_list,
             source=source_path,
-            expected_count=f2_result.expected_count,
+            expected_count=validation_expected_count,
             complete=not bool(incomplete_reason),
             pages=f2_result.pages,
             diagnostics=diagnostics,
