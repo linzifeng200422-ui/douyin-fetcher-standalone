@@ -1812,6 +1812,8 @@ def main():
                   "requested": detail_result.requested,
                   "items": len(detail_result.aweme_list),
                   "errors": len(detail_result.errors),
+                  "missing_ids": missing_detail_ids,
+                  "error_items": detail_result.errors[:20],
                 })
             if count_limit is None and browser_ids:
               validation_expected_count = max(
