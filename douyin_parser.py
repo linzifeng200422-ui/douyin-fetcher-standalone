@@ -895,6 +895,8 @@ def probe_video_dimensions(video_path: Path) -> tuple[int, int] | None:
 
 
 def completed_video_matches_selection(video_dir: Path, video_selection: dict[str, Any]) -> bool:
+  if not video_selection:
+    return False
   expected_width = safe_int(video_selection.get("width"))
   expected_height = safe_int(video_selection.get("height"))
   if not expected_width or not expected_height:
@@ -1000,6 +1002,7 @@ def select_best_video_candidate(
   video_info: dict[str, Any],
   *,
   video_quality: str = "balanced",
+  video_orientation: str = "auto",
 ) -> dict[str, Any]:
   candidates: list[dict[str, Any]] = []
   bit_rate = video_info.get("bit_rate")
@@ -1028,6 +1031,21 @@ def select_best_video_candidate(
 
   if not candidates:
     return {}
+
+  if video_orientation in ("landscape", "portrait"):
+    expected_landscape = video_orientation == "landscape"
+    candidates = [
+      candidate for candidate in candidates
+      if safe_int(candidate.get("width"))
+      and safe_int(candidate.get("height"))
+      and (
+        safe_int(candidate.get("width")) > safe_int(candidate.get("height"))
+        if expected_landscape
+        else safe_int(candidate.get("height")) > safe_int(candidate.get("width"))
+      )
+    ]
+    if not candidates:
+      return {}
 
   target_width = safe_int(video_info.get("width"))
   target_height = safe_int(video_info.get("height"))
@@ -1081,6 +1099,7 @@ def get_aweme_media_selection(
   aweme: dict[str, Any],
   *,
   video_quality: str = "balanced",
+  video_orientation: str = "auto",
 ) -> dict[str, Any]:
   audio_url = ""
   music_info = aweme.get("music", {})
@@ -1096,7 +1115,11 @@ def get_aweme_media_selection(
   video_selection: dict[str, Any] = {}
   video_info = aweme.get("video", {})
   if isinstance(video_info, dict):
-    video_selection = select_best_video_candidate(video_info, video_quality=video_quality)
+    video_selection = select_best_video_candidate(
+      video_info,
+      video_quality=video_quality,
+      video_orientation=video_orientation,
+    )
 
   return {
     "audio_url": audio_url,
@@ -1187,6 +1210,7 @@ def process_aweme_list(
   keep_video: bool,
   source_path: str,
   video_quality: str,
+  video_orientation: str,
 ) -> dict[str, int]:
   account_folder = sanitize_folder_name(nickname)
   stats_summary = {"success": 0, "failed": 0, "skipped": 0}
@@ -1205,7 +1229,11 @@ def process_aweme_list(
     video_dir.mkdir(parents=True, exist_ok=True)
     audio_path = video_dir / "audio.mp3"
     video_path = video_dir / "video.mp4"
-    media_selection = get_aweme_media_selection(aweme, video_quality=video_quality)
+    media_selection = get_aweme_media_selection(
+      aweme,
+      video_quality=video_quality,
+      video_orientation=video_orientation,
+    )
     audio_url = media_selection["audio_url"]
     video_url = media_selection["video_url"]
     video_selection = media_selection["video_selection"]
@@ -1233,6 +1261,7 @@ def process_aweme_list(
       "source_path": source_path,
       "video_selection": video_selection,
       "video_quality": video_quality,
+      "video_orientation": video_orientation,
       "notes": []
     }
     write_sample_status(video_dir, sample_status)
@@ -1240,7 +1269,9 @@ def process_aweme_list(
     if not video_url:
       logger.warning(f"视频ID {aweme_id} 缺少可用的视频播放资源链接，跳过")
       sample_status["status"] = "download_failed"
-      sample_status["notes"].append("no video play url found")
+      sample_status["notes"].append(
+        f"no video play url found for orientation={video_orientation}"
+      )
       write_sample_status(video_dir, sample_status)
       stats_summary["failed"] += 1
       continue
@@ -1478,6 +1509,12 @@ def main():
       "视频流选择策略。balanced: 默认，画幅优先且偏清晰度/码率；"
       "resolution: 强制偏最高分辨率；bitrate: 偏最高码率/大文件；h264: 偏 h264 兼容流"
     ),
+  )
+  parser.add_argument(
+    "--video-orientation",
+    choices=["auto", "landscape", "portrait"],
+    default="auto",
+    help="视频方向过滤。auto: 不限制；landscape: 只接受横屏候选；portrait: 只接受竖屏候选。",
   )
   parser.add_argument("--list-only", action="store_true", help="只拉取作品列表并打印 aweme_id，不下载媒体")
   parser.add_argument("--no-install-f2", action="store_true", help="F2 不存在时不自动创建 .external/venv-f2")
@@ -1747,6 +1784,7 @@ def main():
           keep_video=args.keep_video,
           source_path=source_path,
           video_quality=args.video_quality,
+          video_orientation=args.video_orientation,
         )
         logger.info(
           "F2 后端任务结束：成功 %s / 跳过 %s / 失败 %s / 总计 %s",
@@ -1841,6 +1879,7 @@ def main():
     keep_video=args.keep_video,
     source_path="legacy",
     video_quality=args.video_quality,
+    video_orientation=args.video_orientation,
   )
   logger.info(
     "任务结束：成功 %s / 跳过 %s / 失败 %s / 总计 %s",

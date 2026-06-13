@@ -195,3 +195,82 @@ def test_media_selection_resolution_mode_prefers_exact_original_resolution():
     assert selection["video_url"] == "https://example.test/original-1438.mp4"
     assert selection["video_selection"]["width"] == 1438
     assert selection["video_selection"]["height"] == 2556
+
+
+def test_media_selection_landscape_filter_rejects_portrait_only_streams():
+    aweme = {
+        "video": {
+            "width": 1080,
+            "height": 1920,
+            "play_addr": {
+                "url_list": ["https://example.test/portrait.mp4"],
+                "width": 1080,
+                "height": 1920,
+                "data_size": 5000,
+            },
+            "bit_rate": [
+                {
+                    "format": "mp4",
+                    "gear_name": "normal_1080_0",
+                    "quality_type": 1,
+                    "bit_rate": 500000,
+                    "play_addr": {
+                        "url_list": ["https://example.test/portrait.mp4"],
+                        "width": 1080,
+                        "height": 1920,
+                        "data_size": 5000,
+                    },
+                }
+            ],
+        }
+    }
+
+    selection = get_aweme_media_selection(aweme, video_orientation="landscape")
+
+    assert selection["video_url"] == ""
+    assert selection["video_selection"] == {}
+
+
+def test_media_selection_landscape_filter_accepts_landscape_streams():
+    aweme = {
+        "video": {
+            "width": 1080,
+            "height": 1920,
+            "play_addr": {
+                "url_list": ["https://example.test/portrait.mp4"],
+                "width": 1080,
+                "height": 1920,
+                "data_size": 5000,
+            },
+            "bit_rate": [
+                {
+                    "format": "mp4",
+                    "gear_name": "normal_1080_0",
+                    "quality_type": 1,
+                    "bit_rate": 500000,
+                    "play_addr": {
+                        "url_list": ["https://example.test/portrait.mp4"],
+                        "width": 1080,
+                        "height": 1920,
+                        "data_size": 5000,
+                    },
+                },
+                {
+                    "format": "mp4",
+                    "gear_name": "normal_1080_0",
+                    "quality_type": 1,
+                    "bit_rate": 450000,
+                    "play_addr": {
+                        "url_list": ["https://example.test/landscape.mp4"],
+                        "width": 1920,
+                        "height": 1080,
+                        "data_size": 4500,
+                    },
+                },
+            ],
+        }
+    }
+
+    selection = get_aweme_media_selection(aweme, video_orientation="landscape")
+
+    assert selection["video_url"] == "https://example.test/landscape.mp4"
