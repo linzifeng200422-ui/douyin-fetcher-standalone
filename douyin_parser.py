@@ -25,6 +25,7 @@ from external_backends import (
   looks_like_douyin_url,
   parse_cookie_header,
   probe_ytdlp_items,
+  run_dy_downloader_backend,
   run_ytdlp_audio,
 )
 
@@ -1490,9 +1491,9 @@ def main():
   parser.add_argument("--all", action="store_true", help="下载博主主页全部可访问作品")
   parser.add_argument(
     "--backend",
-    choices=["auto", "f2", "yt-dlp", "legacy"],
+    choices=["auto", "f2", "yt-dlp", "legacy", "dy-downloader", "jiji"],
     default="auto",
-    help="抓取/下载后端。auto: 主页优先 F2，普通链接优先 yt-dlp",
+    help="抓取/下载后端。auto: 主页优先 F2，普通链接优先 yt-dlp；dy-downloader/jiji: 使用 jiji262/douyin-downloader",
   )
   parser.add_argument("--account-name", default="", help="自定义博主文件夹命名")
   parser.add_argument("--output-dir", default="downloads", help="本地输出路径")
@@ -1518,6 +1519,11 @@ def main():
   )
   parser.add_argument("--list-only", action="store_true", help="只拉取作品列表并打印 aweme_id，不下载媒体")
   parser.add_argument("--no-install-f2", action="store_true", help="F2 不存在时不自动创建 .external/venv-f2")
+  parser.add_argument(
+    "--no-install-dy-downloader",
+    action="store_true",
+    help="dy-downloader 依赖不存在时不自动创建 .external/venv-douyin-downloader",
+  )
   parser.add_argument(
     "--browser-fallback",
     action=argparse.BooleanOptionalAction,
@@ -1583,6 +1589,37 @@ def main():
   nickname = args.account_name or "未命名账号"
   count_limit = None if args.all or args.count <= 0 else args.count
   effective_url = final_url or args.url
+
+  if args.backend in ("dy-downloader", "jiji"):
+    if args.list_only:
+      logger.error("dy-downloader 后端是下载器，不支持 --list-only；列表探测请使用 --backend f2。")
+      sys.exit(1)
+    if args.video_orientation != "auto":
+      logger.warning("dy-downloader 后端不支持按横竖屏过滤，已忽略 --video-orientation=%s。", args.video_orientation)
+    try:
+      dy_output_dir = output_base / "dy-downloader"
+      logger.info("正在通过 jiji262/douyin-downloader 后端下载，输出目录: %s", dy_output_dir)
+      result = run_dy_downloader_backend(
+        url=args.url,
+        output_dir=dy_output_dir,
+        count_limit=count_limit,
+        cookie_str=cookie_str,
+        video_quality=args.video_quality,
+        auto_install=not args.no_install_dy_downloader,
+      )
+      logger.info(
+        "dy-downloader 后端完成：输出目录 %s，当前扫描到视频文件 %s 个",
+        result.output_dir,
+        len(result.video_files),
+      )
+      for video_file in result.video_files[:20]:
+        logger.info("dy-downloader 视频文件: %s", video_file)
+      if len(result.video_files) > 20:
+        logger.info("dy-downloader 还有 %s 个视频文件未逐条打印。", len(result.video_files) - 20)
+      return
+    except ExternalBackendError as exc:
+      logger.error(f"dy-downloader 后端失败: {exc}")
+      sys.exit(1)
 
   # 非抖音链接或显式 yt-dlp 后端：交给 yt-dlp，当前项目只做归一化与转写。
   if args.backend == "yt-dlp" or (

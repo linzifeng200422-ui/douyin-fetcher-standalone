@@ -25,6 +25,8 @@ logger = logging.getLogger("douyin-fetcher-standalone.external")
 EXTERNAL_DIR = Path(".external")
 RUNTIME_DIR = EXTERNAL_DIR / "runtime"
 F2_VENV_DIR = EXTERNAL_DIR / "venv-f2"
+DY_DOWNLOADER_DIR = EXTERNAL_DIR / "research" / "douyin-downloader"
+DY_DOWNLOADER_VENV_DIR = EXTERNAL_DIR / "venv-douyin-downloader"
 YT_DLP_ARCHIVE = EXTERNAL_DIR / "yt-dlp-archive.txt"
 
 
@@ -72,6 +74,14 @@ class YtDlpProbeItem:
   uploader: str
   extractor: str
   webpage_url: str
+
+
+@dataclass
+class DyDownloaderRunResult:
+  output_dir: Path
+  video_files: list[Path]
+  stdout: str
+  stderr: str
 
 
 def ensure_external_dirs() -> None:
@@ -154,6 +164,20 @@ def python_can_import(python_bin: Path, module_name: str) -> bool:
     return False
 
 
+def python_can_import_all(python_bin: Path, module_names: list[str]) -> bool:
+  imports = "; ".join(f"import {name}" for name in module_names)
+  try:
+    result = subprocess.run(
+      [str(python_bin), "-c", imports],
+      capture_output=True,
+      text=True,
+      timeout=20,
+    )
+    return result.returncode == 0
+  except Exception:
+    return False
+
+
 def ensure_f2_python(auto_install: bool = True) -> Path:
   """Return a Python executable that can import f2.
 
@@ -183,6 +207,42 @@ def ensure_f2_python(auto_install: bool = True) -> Path:
   return python_bin
 
 
+def ensure_dy_downloader_python(auto_install: bool = True) -> Path:
+  """Return a Python executable suitable for jiji262/douyin-downloader."""
+  if not DY_DOWNLOADER_DIR.is_dir():
+    raise ExternalBackendError(
+      f"未找到 jiji262/douyin-downloader 源码目录: {DY_DOWNLOADER_DIR}"
+    )
+
+  required_modules = ["aiohttp", "yaml", "rich"]
+  candidates = [venv_python_path(DY_DOWNLOADER_VENV_DIR), Path(sys.executable)]
+  for candidate in candidates:
+    if candidate.exists() and python_can_import_all(candidate, required_modules):
+      return candidate
+
+  if not auto_install:
+    raise ExternalBackendError(
+      "未检测到可运行 dy-downloader 的 Python 环境。"
+    )
+
+  ensure_external_dirs()
+  logger.info("未检测到 dy-downloader 依赖，正在创建隔离环境: %s", DY_DOWNLOADER_VENV_DIR)
+  subprocess.run([sys.executable, "-m", "venv", str(DY_DOWNLOADER_VENV_DIR)], check=True)
+  python_bin = venv_python_path(DY_DOWNLOADER_VENV_DIR)
+  requirements_path = DY_DOWNLOADER_DIR / "requirements.txt"
+  if not requirements_path.is_file():
+    raise ExternalBackendError(f"dy-downloader requirements.txt 不存在: {requirements_path}")
+  logger.info("正在隔离环境安装 dy-downloader 依赖，此步骤可能需要数分钟...")
+  subprocess.run(
+    [str(python_bin), "-m", "pip", "install", "-r", str(requirements_path)],
+    check=True,
+  )
+
+  if not python_can_import_all(python_bin, required_modules):
+    raise ExternalBackendError("dy-downloader 依赖安装完成但仍无法导入。")
+  return python_bin
+
+
 def terminate_process_group(proc: subprocess.Popen) -> None:
   if proc.poll() is not None:
     return
@@ -208,6 +268,7 @@ def run_supervised(
   cwd: Path | None = None,
   cookie_str: str = "",
   timeout: int | None = None,
+  env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
   start_new_session = os.name != "nt"
   proc = subprocess.Popen(
@@ -217,6 +278,7 @@ def run_supervised(
     stderr=subprocess.PIPE,
     text=True,
     start_new_session=start_new_session,
+    env=env,
   )
   try:
     stdout, stderr = proc.communicate(timeout=timeout)
@@ -230,6 +292,142 @@ def run_supervised(
   stdout = redact_cookie_values(stdout or "", cookie_str)
   stderr = redact_cookie_values(stderr or "", cookie_str)
   return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def dy_downloader_quality(video_quality: str) -> str:
+  if video_quality == "resolution":
+    return "1440p"
+  if video_quality == "h264":
+    return "1080p"
+  return "highest"
+
+
+def build_dy_downloader_config(
+  *,
+  url: str,
+  output_dir: Path,
+  count_limit: int | None,
+  thread: int = 5,
+  video_quality: str = "balanced",
+) -> dict[str, Any]:
+  post_count = int(count_limit or 0)
+  return {
+    "link": [url],
+    "path": str(output_dir),
+    "music": False,
+    "cover": False,
+    "avatar": False,
+    "json": True,
+    "folderstyle": True,
+    "filename_template": "{id}",
+    "folder_template": "{id}",
+    "author_dir": "nickname_uid",
+    "download_pinned": False,
+    "mode": ["post"],
+    "number": {
+      "post": post_count,
+      "like": 0,
+      "allmix": 0,
+      "mix": 0,
+      "music": 0,
+      "collect": 0,
+      "collectmix": 0,
+    },
+    "increase": {
+      "post": False,
+      "like": False,
+      "allmix": False,
+      "mix": False,
+      "music": False,
+    },
+    "thread": int(thread or 5),
+    "retry_times": 3,
+    "rate_limit": 2,
+    "proxy": "",
+    "database": False,
+    "progress": {"quiet_logs": True},
+    "browser_fallback": {
+      "enabled": True,
+      "headless": False,
+      "max_scrolls": 240,
+      "idle_rounds": 8,
+      "wait_timeout_seconds": 600,
+    },
+    "transcript": {"enabled": False},
+    "comments": {"enabled": False},
+    "notifications": {"enabled": False, "providers": []},
+    "video_quality": dy_downloader_quality(video_quality),
+  }
+
+
+def scan_video_files(root: Path) -> list[Path]:
+  if not root.exists():
+    return []
+  return sorted(
+    path for path in root.rglob("*")
+    if path.is_file() and path.suffix.lower() in {".mp4", ".mov", ".m4v", ".flv"}
+  )
+
+
+def run_dy_downloader_backend(
+  *,
+  url: str,
+  output_dir: Path,
+  count_limit: int | None,
+  cookie_str: str,
+  thread: int = 5,
+  video_quality: str = "balanced",
+  auto_install: bool = True,
+) -> DyDownloaderRunResult:
+  if not cookie_str:
+    raise ExternalBackendError("dy-downloader 后端需要有效 cookie.txt；请先运行 get_cookie.py 扫码登录。")
+
+  ensure_external_dirs()
+  python_bin = ensure_dy_downloader_python(auto_install=auto_install)
+  output_dir = output_dir.resolve()
+  output_dir.mkdir(parents=True, exist_ok=True)
+
+  config_path = RUNTIME_DIR / f"dy-downloader-config-{os.getpid()}.json"
+  cleanup_targets = [config_path]
+  config = build_dy_downloader_config(
+    url=url,
+    output_dir=output_dir,
+    count_limit=count_limit,
+    thread=thread,
+    video_quality=video_quality,
+  )
+
+  env = os.environ.copy()
+  env["DOUYIN_COOKIE"] = cookie_str
+  env["DOUYIN_PATH"] = str(output_dir)
+  env["DOUYIN_THREAD"] = str(int(thread or 5))
+
+  try:
+    secure_write_text(config_path, json.dumps(config, ensure_ascii=False, indent=2))
+    dy_downloader_dir = DY_DOWNLOADER_DIR.resolve()
+    cmd = [
+      str(python_bin),
+      str(dy_downloader_dir / "run.py"),
+      "-c",
+      str(config_path.resolve()),
+    ]
+    result = run_supervised(
+      cmd,
+      cwd=dy_downloader_dir,
+      cookie_str=cookie_str,
+      env=env,
+    )
+    if result.returncode != 0:
+      details = result.stderr.strip() or result.stdout.strip()
+      raise ExternalBackendError(f"dy-downloader 下载失败: {details}")
+    return DyDownloaderRunResult(
+      output_dir=output_dir,
+      video_files=scan_video_files(output_dir),
+      stdout=result.stdout,
+      stderr=result.stderr,
+    )
+  finally:
+    cleanup_paths(cleanup_targets)
 
 
 F2_FETCHER_CODE = r'''

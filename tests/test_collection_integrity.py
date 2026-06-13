@@ -7,6 +7,7 @@ from douyin_parser import (
     is_completed_video_dir,
     merge_aweme_lists_by_id,
 )
+from external_backends import build_dy_downloader_config, dy_downloader_quality
 from get_cookie import has_login_cookie
 
 
@@ -274,3 +275,28 @@ def test_media_selection_landscape_filter_accepts_landscape_streams():
     selection = get_aweme_media_selection(aweme, video_orientation="landscape")
 
     assert selection["video_url"] == "https://example.test/landscape.mp4"
+
+
+def test_dy_downloader_config_keeps_cookie_out_of_temp_config(tmp_path):
+    config = build_dy_downloader_config(
+        url="https://www.douyin.com/video/123",
+        output_dir=tmp_path,
+        count_limit=None,
+        thread=3,
+        video_quality="resolution",
+    )
+
+    assert config["link"] == ["https://www.douyin.com/video/123"]
+    assert config["path"] == str(tmp_path)
+    assert config["number"]["post"] == 0
+    assert config["thread"] == 3
+    assert config["video_quality"] == "1440p"
+    assert "cookie" not in config
+    assert "cookies" not in config
+
+
+def test_dy_downloader_quality_mapping():
+    assert dy_downloader_quality("balanced") == "highest"
+    assert dy_downloader_quality("bitrate") == "highest"
+    assert dy_downloader_quality("resolution") == "1440p"
+    assert dy_downloader_quality("h264") == "1080p"
