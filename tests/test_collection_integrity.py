@@ -103,7 +103,7 @@ def test_media_selection_prefers_original_landscape_ratio():
     assert selection["video_selection"]["height"] == 1080
 
 
-def test_media_selection_prefers_exact_original_resolution_over_default_play_addr():
+def test_media_selection_balanced_prefers_clearer_bitrate_over_lowest_1440():
     aweme = {
         "video": {
             "width": 1438,
@@ -117,6 +117,8 @@ def test_media_selection_prefers_exact_original_resolution_over_default_play_add
             "bit_rate": [
                 {
                     "format": "mp4",
+                    "gear_name": "normal_1080_0",
+                    "quality_type": 1,
                     "bit_rate": 574153,
                     "play_addr": {
                         "url_list": ["https://example.test/default-1080.mp4"],
@@ -127,6 +129,8 @@ def test_media_selection_prefers_exact_original_resolution_over_default_play_add
                 },
                 {
                     "format": "mp4",
+                    "gear_name": "adapt_lowest_1440_1",
+                    "quality_type": 7,
                     "bit_rate": 373557,
                     "play_addr": {
                         "url_list": ["https://example.test/original-1438.mp4"],
@@ -140,6 +144,53 @@ def test_media_selection_prefers_exact_original_resolution_over_default_play_add
     }
 
     selection = get_aweme_media_selection(aweme)
+
+    assert selection["video_url"] == "https://example.test/default-1080.mp4"
+    assert selection["video_selection"]["width"] == 1080
+    assert selection["video_selection"]["height"] == 1920
+
+
+def test_media_selection_resolution_mode_prefers_exact_original_resolution():
+    aweme = {
+        "video": {
+            "width": 1438,
+            "height": 2556,
+            "play_addr": {
+                "url_list": ["https://example.test/default-1080.mp4"],
+                "width": 1080,
+                "height": 1920,
+                "data_size": 5000,
+            },
+            "bit_rate": [
+                {
+                    "format": "mp4",
+                    "gear_name": "normal_1080_0",
+                    "quality_type": 1,
+                    "bit_rate": 574153,
+                    "play_addr": {
+                        "url_list": ["https://example.test/default-1080.mp4"],
+                        "width": 1080,
+                        "height": 1920,
+                        "data_size": 5222789,
+                    },
+                },
+                {
+                    "format": "mp4",
+                    "gear_name": "adapt_lowest_1440_1",
+                    "quality_type": 7,
+                    "bit_rate": 373557,
+                    "play_addr": {
+                        "url_list": ["https://example.test/original-1438.mp4"],
+                        "width": 1438,
+                        "height": 2556,
+                        "data_size": 3398062,
+                    },
+                },
+            ],
+        }
+    }
+
+    selection = get_aweme_media_selection(aweme, video_quality="resolution")
 
     assert selection["video_url"] == "https://example.test/original-1438.mp4"
     assert selection["video_selection"]["width"] == 1438

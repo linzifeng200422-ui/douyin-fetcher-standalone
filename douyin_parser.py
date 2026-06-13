@@ -964,6 +964,8 @@ def add_video_candidate(
     "format": bit_rate_info.get("format") or "",
     "gear_name": bit_rate_info.get("gear_name") or "",
     "quality_type": bit_rate_info.get("quality_type"),
+    "is_h265": bool(bit_rate_info.get("is_h265")),
+    "is_bytevc1": bool(bit_rate_info.get("is_bytevc1")),
   }
   key = (candidate["url"], candidate["width"], candidate["height"], candidate["source"])
   for existing in candidates:
@@ -978,7 +980,27 @@ def add_video_candidate(
   candidates.append(candidate)
 
 
-def select_best_video_candidate(video_info: dict[str, Any]) -> dict[str, Any]:
+def video_quality_family(candidate: dict[str, Any]) -> int:
+  gear_name = str(candidate.get("gear_name") or "").lower()
+  quality_type = safe_int(candidate.get("quality_type"))
+  if gear_name.startswith("normal") or quality_type == 1:
+    return 4
+  if gear_name.startswith("low_"):
+    return 2
+  if gear_name.startswith("adapt_lowest") or gear_name.startswith("adapt_lower"):
+    return 1
+  if gear_name.startswith("adapt"):
+    return 2
+  if gear_name.startswith("lower"):
+    return 1
+  return 0
+
+
+def select_best_video_candidate(
+  video_info: dict[str, Any],
+  *,
+  video_quality: str = "balanced",
+) -> dict[str, Any]:
   candidates: list[dict[str, Any]] = []
   bit_rate = video_info.get("bit_rate")
   if isinstance(bit_rate, list):
@@ -1011,7 +1033,7 @@ def select_best_video_candidate(video_info: dict[str, Any]) -> dict[str, Any]:
   target_height = safe_int(video_info.get("height"))
   target_ratio = target_width / target_height if target_width and target_height else 0.0
 
-  def score(candidate: dict[str, Any]) -> tuple[float, int, int, int, int]:
+  def score(candidate: dict[str, Any]) -> tuple[float, int, int, int, int, int, int]:
     width = safe_int(candidate.get("width"))
     height = safe_int(candidate.get("height"))
     area = width * height
@@ -1020,16 +1042,30 @@ def select_best_video_candidate(video_info: dict[str, Any]) -> dict[str, Any]:
       ratio_penalty = abs(candidate_ratio - target_ratio) / target_ratio
     else:
       ratio_penalty = 1.0
-    # 原始比例优先，其次是分辨率和码率。mp4 优先于 dash，便于直接落盘。
     ratio_score = max(0.0, 1.0 - min(ratio_penalty, 1.0))
-    format_score = 1 if str(candidate.get("format") or "").lower() == "mp4" else 0
+    if ratio_penalty <= 0.01:
+      ratio_score = 1.0
+    format_score = 1 if str(candidate.get("format") or "").lower() in ("", "mp4") else 0
+    quality_family = video_quality_family(candidate)
+    bitrate = safe_int(candidate.get("bit_rate"))
+    data_size = safe_int(candidate.get("data_size"))
+    h264_score = 0 if candidate.get("is_h265") or candidate.get("is_bytevc1") else 1
     source_score = 1 if str(candidate.get("source") or "").startswith("bit_rate[") else 0
+    if video_quality == "resolution":
+      return (ratio_score, format_score, area, quality_family, bitrate, data_size, h264_score)
+    if video_quality == "bitrate":
+      return (ratio_score, format_score, bitrate, data_size, quality_family, area, h264_score)
+    if video_quality == "h264":
+      return (ratio_score, format_score, h264_score, bitrate, data_size, quality_family, area)
+    # balanced: 先保持画幅，再优先选择正常清晰度/码率，避免低码率大分辨率假清晰。
     return (
       ratio_score,
+      format_score,
+      quality_family,
+      bitrate,
+      data_size,
       area,
-      safe_int(candidate.get("bit_rate")),
-      safe_int(candidate.get("data_size")),
-      format_score + source_score,
+      h264_score + source_score,
     )
 
   selected = max(candidates, key=score)
@@ -1037,10 +1073,15 @@ def select_best_video_candidate(video_info: dict[str, Any]) -> dict[str, Any]:
   selected["target_width"] = target_width
   selected["target_height"] = target_height
   selected["candidate_count"] = len(candidates)
+  selected["video_quality"] = video_quality
   return selected
 
 
-def get_aweme_media_selection(aweme: dict[str, Any]) -> dict[str, Any]:
+def get_aweme_media_selection(
+  aweme: dict[str, Any],
+  *,
+  video_quality: str = "balanced",
+) -> dict[str, Any]:
   audio_url = ""
   music_info = aweme.get("music", {})
   if isinstance(music_info, dict) and music_info.get("play_url"):
@@ -1055,7 +1096,7 @@ def get_aweme_media_selection(aweme: dict[str, Any]) -> dict[str, Any]:
   video_selection: dict[str, Any] = {}
   video_info = aweme.get("video", {})
   if isinstance(video_info, dict):
-    video_selection = select_best_video_candidate(video_info)
+    video_selection = select_best_video_candidate(video_info, video_quality=video_quality)
 
   return {
     "audio_url": audio_url,
@@ -1145,6 +1186,7 @@ def process_aweme_list(
   skip_asr: bool,
   keep_video: bool,
   source_path: str,
+  video_quality: str,
 ) -> dict[str, int]:
   account_folder = sanitize_folder_name(nickname)
   stats_summary = {"success": 0, "failed": 0, "skipped": 0}
@@ -1163,7 +1205,7 @@ def process_aweme_list(
     video_dir.mkdir(parents=True, exist_ok=True)
     audio_path = video_dir / "audio.mp3"
     video_path = video_dir / "video.mp4"
-    media_selection = get_aweme_media_selection(aweme)
+    media_selection = get_aweme_media_selection(aweme, video_quality=video_quality)
     audio_url = media_selection["audio_url"]
     video_url = media_selection["video_url"]
     video_selection = media_selection["video_selection"]
@@ -1190,6 +1232,7 @@ def process_aweme_list(
       "transcript_ready": False,
       "source_path": source_path,
       "video_selection": video_selection,
+      "video_quality": video_quality,
       "notes": []
     }
     write_sample_status(video_dir, sample_status)
@@ -1427,6 +1470,15 @@ def main():
   parser.add_argument("--whisper-path", default="", help="可选：本地自定义 Whisper ASR 执行脚本路径")
   parser.add_argument("--skip-asr", action="store_true", help="跳过 Whisper 转写，适合全量下载测试")
   parser.add_argument("--keep-video", action="store_true", help="兼容旧参数；当前默认保存 video.mp4")
+  parser.add_argument(
+    "--video-quality",
+    choices=["balanced", "resolution", "bitrate", "h264"],
+    default="balanced",
+    help=(
+      "视频流选择策略。balanced: 默认，画幅优先且偏清晰度/码率；"
+      "resolution: 强制偏最高分辨率；bitrate: 偏最高码率/大文件；h264: 偏 h264 兼容流"
+    ),
+  )
   parser.add_argument("--list-only", action="store_true", help="只拉取作品列表并打印 aweme_id，不下载媒体")
   parser.add_argument("--no-install-f2", action="store_true", help="F2 不存在时不自动创建 .external/venv-f2")
   parser.add_argument(
@@ -1694,6 +1746,7 @@ def main():
           skip_asr=args.skip_asr,
           keep_video=args.keep_video,
           source_path=source_path,
+          video_quality=args.video_quality,
         )
         logger.info(
           "F2 后端任务结束：成功 %s / 跳过 %s / 失败 %s / 总计 %s",
@@ -1787,6 +1840,7 @@ def main():
     skip_asr=args.skip_asr,
     keep_video=args.keep_video,
     source_path="legacy",
+    video_quality=args.video_quality,
   )
   logger.info(
     "任务结束：成功 %s / 跳过 %s / 失败 %s / 总计 %s",
