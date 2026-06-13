@@ -1530,10 +1530,10 @@ def main():
   parser.add_argument(
     "--video-quality",
     choices=["balanced", "resolution", "bitrate", "h264"],
-    default="balanced",
+    default="resolution",
     help=(
-      "视频流选择策略。balanced: 默认，画幅优先且偏清晰度/码率；"
-      "resolution: 强制偏最高分辨率；bitrate: 偏最高码率/大文件；h264: 偏 h264 兼容流"
+      "视频流选择策略。resolution: 默认，画幅优先且偏最高分辨率；"
+      "balanced: 偏正常清晰度/码率；bitrate: 偏最高码率/大文件；h264: 偏 h264 兼容流"
     ),
   )
   parser.add_argument(
