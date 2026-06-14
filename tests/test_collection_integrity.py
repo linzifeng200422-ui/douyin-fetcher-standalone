@@ -334,3 +334,47 @@ def test_dy_downloader_quality_mapping():
     assert dy_downloader_quality("bitrate") == "highest"
     assert dy_downloader_quality("resolution") == "1440p"
     assert dy_downloader_quality("h264") == "1080p"
+
+
+def test_media_selection_extracts_image_album_urls():
+    aweme = {
+        "images": [
+            {"url_list": ["https://example.test/img1.jpg"]},
+            {"url_list": ["https://example.test/img2.jpg"]},
+        ]
+    }
+    selection = get_aweme_media_selection(aweme)
+    assert selection["images_urls"] == ["https://example.test/img1.jpg", "https://example.test/img2.jpg"]
+    assert selection["video_url"] == ""
+
+
+def test_media_selection_resolution_aspect_ratio_tolerance():
+    aweme = {
+        "video": {
+            "width": 1080,
+            "height": 1920,
+            "play_addr": {
+                "url_list": ["https://example.test/preview-540p.mp4"],
+                "width": 540,
+                "height": 960,
+                "data_size": 1000,
+            },
+            "bit_rate": [
+                {
+                    "format": "mp4",
+                    "gear_name": "normal_1080_0",
+                    "quality_type": 1,
+                    "bit_rate": 5000000,
+                    "play_addr": {
+                        "url_list": ["https://example.test/original-1080p.mp4"],
+                        "width": 1080,
+                        "height": 1918,
+                        "data_size": 5000000,
+                    },
+                }
+            ],
+        }
+    }
+    selection = get_aweme_media_selection(aweme, video_quality="resolution")
+    assert selection["video_url"] == "https://example.test/original-1080p.mp4"
+

@@ -724,7 +724,11 @@ def scrape_user_posts_via_browser_fallback(
         break
       try:
         page.mouse.wheel(0, 3800)
-        page.wait_for_timeout(1200)
+        page.wait_for_timeout(400)
+        page.evaluate("window.scrollBy(0, 4000)")
+        page.wait_for_timeout(400)
+        page.keyboard.press("End")
+        page.wait_for_timeout(400)
       except Exception:
         break
       after = len(id_order) + len(post_aweme_by_id)
@@ -858,23 +862,35 @@ def sanitize_folder_name(value: str) -> str:
   return safe.strip("._") or "未命名账号"
 
 
-def is_completed_video_dir(video_dir: Path) -> bool:
+def is_completed_video_dir(video_dir: Path, is_image_album: bool = False, expected_images_count: int = 0) -> bool:
   status_path = video_dir / "collection-status.json"
-  audio_path = video_dir / "audio.mp3"
-  video_path = video_dir / "video.mp4"
-  if (
-    not status_path.is_file()
-    or not video_path.is_file()
-    or video_path.stat().st_size <= 0
-    or not audio_path.is_file()
-    or audio_path.stat().st_size <= 0
-  ):
+  if not status_path.is_file():
     return False
   try:
     status = json.loads(status_path.read_text(encoding="utf-8"))
   except Exception:
     return False
-  return status.get("status") == "success"
+  if status.get("status") != "success":
+    return False
+
+  if is_image_album:
+    for idx in range(expected_images_count):
+      img_path = video_dir / f"image_{idx + 1}.jpg"
+      if not img_path.is_file() or img_path.stat().st_size <= 0:
+        return False
+    return True
+  else:
+    audio_path = video_dir / "audio.mp3"
+    video_path = video_dir / "video.mp4"
+    if (
+      not video_path.is_file()
+      or video_path.stat().st_size <= 0
+      or not audio_path.is_file()
+      or audio_path.stat().st_size <= 0
+    ):
+      return False
+    return True
+
 
 
 def probe_video_dimensions(video_path: Path) -> tuple[int, int] | None:
@@ -1037,6 +1053,8 @@ def select_best_video_candidate(
         source=f"bit_rate[{index}].play_addr",
         rank=index,
         bit_rate_info=item,
+        default_width=target_width,
+        default_height=target_height,
       )
 
   fallback_keys = [
@@ -1077,7 +1095,7 @@ def select_best_video_candidate(
 
   target_ratio = target_width / target_height if target_width and target_height else 0.0
 
-  def score(candidate: dict[str, Any]) -> tuple[float, int, int, int, int, int, int]:
+  def score(candidate: dict[str, Any]) -> tuple[float, int, int, int, int, int, int, int]:
     width = safe_int(candidate.get("width"))
     height = safe_int(candidate.get("height"))
     area = width * height
@@ -1087,7 +1105,7 @@ def select_best_video_candidate(
     else:
       ratio_penalty = 1.0
     ratio_score = max(0.0, 1.0 - min(ratio_penalty, 1.0))
-    if ratio_penalty <= 0.01:
+    if ratio_penalty <= 0.15:
       ratio_score = 1.0
     format_score = 1 if str(candidate.get("format") or "").lower() in ("", "mp4") else 0
     quality_family = video_quality_family(candidate)
@@ -1096,20 +1114,21 @@ def select_best_video_candidate(
     h264_score = 0 if candidate.get("is_h265") or candidate.get("is_bytevc1") else 1
     source_score = 1 if str(candidate.get("source") or "").startswith("bit_rate[") else 0
     if video_quality == "resolution":
-      return (ratio_score, format_score, area, quality_family, bitrate, data_size, h264_score)
+      return (ratio_score, format_score, source_score, area, quality_family, bitrate, data_size, h264_score)
     if video_quality == "bitrate":
-      return (ratio_score, format_score, bitrate, data_size, quality_family, area, h264_score)
+      return (ratio_score, format_score, source_score, bitrate, data_size, quality_family, area, h264_score)
     if video_quality == "h264":
       return (ratio_score, format_score, h264_score, bitrate, data_size, quality_family, area)
     # balanced: 先保持画幅，再优先选择正常清晰度/码率，避免低码率大分辨率假清晰。
     return (
       ratio_score,
       format_score,
+      source_score,
       quality_family,
       bitrate,
       data_size,
       area,
-      h264_score + source_score,
+      h264_score,
     )
 
   selected = max(candidates, key=score)
@@ -1147,15 +1166,32 @@ def get_aweme_media_selection(
       video_orientation=video_orientation,
     )
 
+  images_urls = []
+  images = aweme.get("images") or aweme.get("image_infos")
+  if isinstance(images, list):
+    for img in images:
+      if isinstance(img, dict):
+        url_list = img.get("url_list")
+        if url_list and isinstance(url_list, list):
+          url = url_list[0]
+          if isinstance(url, str) and url.strip():
+            images_urls.append(url.strip())
+        elif img.get("uri") and isinstance(img.get("uri"), str):
+          url = img.get("uri")
+          if url.startswith("http"):
+            images_urls.append(url.strip())
+
   return {
     "audio_url": audio_url,
     "video_url": video_selection.get("url", ""),
+    "images_urls": images_urls,
     "video_selection": {
       key: value
       for key, value in video_selection.items()
       if key != "url"
     },
   }
+
 
 
 def get_aweme_media_urls(aweme: dict[str, Any]) -> tuple[str, str]:
@@ -1194,13 +1230,16 @@ def finalize_transcript(
   skip_asr: bool,
   whisper_path: str,
 ) -> None:
-  if skip_asr:
+  if skip_asr or not audio_path.exists():
     transcript_path = video_dir / "transcript.md"
     if not transcript_path.exists():
       transcript_path.write_text("N/A", encoding="utf-8")
     sample_status["transcript_ready"] = False
     sample_status["status"] = "success"
-    sample_status["notes"].append("asr skipped by --skip-asr")
+    if not audio_path.exists():
+      sample_status["notes"].append("asr skipped: audio file not found")
+    else:
+      sample_status["notes"].append("asr skipped by --skip-asr")
     logger.info("已跳过 ASR，下载状态记为 success。")
     return
 
@@ -1214,6 +1253,7 @@ def finalize_transcript(
     sample_status["status"] = "asr_failed"
     sample_status["notes"].append("whisper command line failed or skipped")
     logger.warning("语音识别失败或跳过，已写入空占位文件。")
+
 
 
 def extract_audio_from_video(video_path: Path, audio_path: Path) -> None:
@@ -1262,10 +1302,12 @@ def process_aweme_list(
     )
     audio_url = media_selection["audio_url"]
     video_url = media_selection["video_url"]
+    images_urls = media_selection.get("images_urls") or []
     video_selection = media_selection["video_selection"]
+    is_image_album = len(images_urls) > 0
 
-    if is_completed_video_dir(video_dir):
-      if completed_video_matches_selection(video_dir, video_selection):
+    if is_completed_video_dir(video_dir, is_image_album=is_image_album, expected_images_count=len(images_urls)):
+      if is_image_album or completed_video_matches_selection(video_dir, video_selection):
         logger.info(f"[{i+1}/{len(aweme_list)}] 跳过已完成作品: {aweme_id}")
         stats_summary["skipped"] += 1
         continue
@@ -1288,11 +1330,12 @@ def process_aweme_list(
       "video_selection": video_selection,
       "video_quality": video_quality,
       "video_orientation": video_orientation,
+      "is_image_album": is_image_album,
       "notes": []
     }
     write_sample_status(video_dir, sample_status)
 
-    if not video_url:
+    if not video_url and not is_image_album:
       logger.warning(f"视频ID {aweme_id} 缺少可用的视频播放资源链接，跳过")
       sample_status["status"] = "download_failed"
       sample_status["notes"].append(
@@ -1304,23 +1347,45 @@ def process_aweme_list(
 
     logger.info(f"[{i+1}/{len(aweme_list)}] 正在拉取作品: {aweme_id} | 标题: {str(desc)[:15]}...")
 
-    logger.info("拉取无水印视频流...")
-    try:
-      download_file(video_url, video_path, cookie_str)
-      sample_status["media_downloaded"] = True
-      sample_status["video_ready"] = True
-    except KeyboardInterrupt:
-      sample_status["status"] = "interrupted"
-      sample_status["notes"].append("interrupted during video download")
-      write_sample_status(video_dir, sample_status)
-      raise
-    except Exception as e:
-      logger.error(f"视频文件下载失败: {e}")
-      sample_status["status"] = "download_failed"
-      sample_status["notes"].append(f"video download failed: {e}")
-      write_sample_status(video_dir, sample_status)
-      stats_summary["failed"] += 1
-      continue
+    if is_image_album:
+      logger.info(f"拉取无水印图集原图列表 (共 {len(images_urls)} 张)...")
+      try:
+        for idx, img_url in enumerate(images_urls):
+          img_path = video_dir / f"image_{idx + 1}.jpg"
+          logger.info(f"正在下载第 {idx + 1}/{len(images_urls)} 张图...")
+          download_file(img_url, img_path, cookie_str)
+        sample_status["media_downloaded"] = True
+        sample_status["video_ready"] = True
+      except KeyboardInterrupt:
+        sample_status["status"] = "interrupted"
+        sample_status["notes"].append("interrupted during image album download")
+        write_sample_status(video_dir, sample_status)
+        raise
+      except Exception as e:
+        logger.error(f"图集图片下载失败: {e}")
+        sample_status["status"] = "download_failed"
+        sample_status["notes"].append(f"image album download failed: {e}")
+        write_sample_status(video_dir, sample_status)
+        stats_summary["failed"] += 1
+        continue
+    else:
+      logger.info("拉取无水印视频流...")
+      try:
+        download_file(video_url, video_path, cookie_str)
+        sample_status["media_downloaded"] = True
+        sample_status["video_ready"] = True
+      except KeyboardInterrupt:
+        sample_status["status"] = "interrupted"
+        sample_status["notes"].append("interrupted during video download")
+        write_sample_status(video_dir, sample_status)
+        raise
+      except Exception as e:
+        logger.error(f"视频文件下载失败: {e}")
+        sample_status["status"] = "download_failed"
+        sample_status["notes"].append(f"video download failed: {e}")
+        write_sample_status(video_dir, sample_status)
+        stats_summary["failed"] += 1
+        continue
 
     if audio_url:
       logger.info("拉取无水印音频流...")
@@ -1339,7 +1404,7 @@ def process_aweme_list(
         write_sample_status(video_dir, sample_status)
         stats_summary["failed"] += 1
         continue
-    else:
+    elif not is_image_album:
       logger.info("未发现直接音频流。正在从 video.mp4 提取音轨...")
       try:
         extract_audio_from_video(video_path, audio_path)
@@ -1851,11 +1916,11 @@ def main():
           return
 
         if incomplete_reason:
-          logger.error(
-            "拒绝执行全量下载：%s。请保持浏览器兜底窗口打开并完成验证，或稍后重试。",
+          logger.warning(
+            "作品列表不完整：%s。为了最大化挽回任务，工具将继续尝试下载当前已采集到的 %s 个作品...",
             incomplete_reason,
+            len(aweme_list),
           )
-          sys.exit(1)
 
         summary = process_aweme_list(
           aweme_list,
