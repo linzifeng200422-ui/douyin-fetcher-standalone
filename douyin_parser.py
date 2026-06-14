@@ -1766,6 +1766,8 @@ def main():
     logger.info(f"检测到主页分享链接 (sec_uid: {sec_user_id})")
 
     if args.backend in ("auto", "f2"):
+      f2_failed = False
+      f2_error = None
       try:
         logger.info("正在通过 F2 后端分页拉取主页作品列表...")
         f2_result = fetch_user_posts_with_f2(
@@ -1943,10 +1945,80 @@ def main():
         )
         return
       except ExternalBackendError as exc:
-        if args.backend == "f2" or count_limit is None:
-          logger.error(f"F2 后端失败: {exc}")
+        f2_failed = True
+        f2_error = exc
+
+      if f2_failed:
+        if not args.browser_fallback:
+          logger.error(f"F2 后端失败: {f2_error}")
           sys.exit(1)
-        logger.warning(f"F2 后端不可用，回退 legacy 逻辑: {exc}")
+        logger.warning(f"F2 后端拉取异常 ({f2_error})，由于启用了浏览器兜底，将直接通过浏览器抓取主页...")
+        browser_items, browser_nickname, browser_ids = scrape_user_posts_via_browser_fallback(
+          sec_user_id,
+          cookie_str=cookie_str,
+          expected_count=None,
+          count_limit=count_limit,
+          trust_expected_count=False,
+          headless=args.browser_headless,
+          max_scrolls=args.browser_max_scrolls,
+          idle_rounds=args.browser_idle_rounds,
+          wait_timeout_seconds=args.browser_wait_timeout,
+          require_login=not cookie_header_has_login(cookie_str),
+        )
+        nickname = args.account_name or browser_nickname or "未命名账号"
+        aweme_list = browser_items or []
+        if not aweme_list:
+          logger.error("通过浏览器兜底也未能抓取到任何作品。请检查网络或登录态。")
+          sys.exit(1)
+
+        source_path = "browser_fallback_only"
+        diagnostics = [{"backend": "f2_failed_fallback_to_browser", "error": str(f2_error)}]
+        validation_expected_count = len(aweme_list)
+        incomplete_reason = ""
+        if count_limit is not None and len(aweme_list) < count_limit:
+          incomplete_reason = f"浏览器采集到的作品数 {len(aweme_list)} 未达到设定限制 {count_limit}"
+
+        if args.list_only:
+          print_list_probe(
+            aweme_list,
+            source=source_path,
+            expected_count=validation_expected_count,
+            complete=not bool(incomplete_reason),
+            pages=0,
+            diagnostics=diagnostics,
+          )
+          if incomplete_reason:
+            logger.error("列表探测未通过完整性校验：%s", incomplete_reason)
+            sys.exit(1)
+          return
+
+        if incomplete_reason:
+          logger.warning(
+            "作品列表不完整：%s。为了最大化挽回任务，工具将继续尝试下载当前已采集到的 %s 个作品...",
+            incomplete_reason,
+            len(aweme_list),
+          )
+
+        summary = process_aweme_list(
+          aweme_list,
+          nickname=nickname,
+          output_base=output_base,
+          cookie_str=cookie_str,
+          whisper_path=args.whisper_path,
+          skip_asr=args.skip_asr,
+          keep_video=args.keep_video,
+          source_path=source_path,
+          video_quality=args.video_quality,
+          video_orientation=args.video_orientation,
+        )
+        logger.info(
+          "任务结束（浏览器兜底模式）：成功 %s / 跳过 %s / 失败 %s / 总计 %s",
+          summary["success"],
+          summary["skipped"],
+          summary["failed"],
+          len(aweme_list),
+        )
+        return
 
     if args.all or args.count <= 0:
       logger.error("legacy 后端不支持 --all；请使用 --backend f2 或修复 F2 环境。")
