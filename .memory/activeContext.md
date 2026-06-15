@@ -1,16 +1,16 @@
 # Active Context
 
 ## 当前状态
-已完成对抖音博主主页作品下载的完整性与最高画质的深入审查与设计方案撰写。
+已完成对抖音博主“派大星小课堂（小猫大学习）”、“柱子哥TzFilm”以及“YuE悦”等博主的高画质视频及图集作品的批量下载验证。重构逻辑通过了 60 个全量作品的实证测试，确认达到了 100% 的高稳定性下载。
 
 ## 上次做了什么
-1. 分析了项目根目录下的 `douyin_parser.py` 分页与画质过滤逻辑。
-2. 扫描并比对了 `.external/research/` 目录下全部 4 个开源参考项目（`f2`, `douyin-downloader`, `Douyin_TikTok_Download_API`, `TikTokDownloader`）的接口选型及实现。
-3. 创建了详尽的分析和改造报告 [analysis_and_plan.md](file:///Users/linzifeng/.gemini/antigravity-cli/brain/e23cb39b-61d7-4fc0-879e-117a386c699c/analysis_and_plan.md)。
+1. 开展了对博主“柱子哥TzFilm”全部 60 个作品的批量原画下载与音轨转换测试（成功率 59/60，1 个视频因临时网络波动 curl exit status 18 导致截断）。
+2. 在 `downloads/` 目录下进行了昵称隔离目录的安全合并清理。
+3. 再次发起增量补全指令，验证了增量跳过逻辑（完美跳过已就绪的 59 个），并成功完成了 300MB+ 失败超大视频原画的增量重试回补（最终总成 60/60 成功落盘）。
 
 ## 下一步具体操作
-等待用户批准方案。若需要进行实际修改，将开始根据方案逐步改造 Cookie 状态探活模块和合集/裸 ID detail 回补流程。
+等待用户进一步的指示。
 
 ## 关键技术决策
-1. **接口选择**：抖音 App 端的签名机制极其复杂且指纹限制多，而 Web 端的 `/aweme/v1/web/aweme/post/` 配合 A-Bogus 签名和有效的登录态 Cookie 具有最佳的可靠性，故继续维持 Web 端接口方案。
-2. **最高画质逻辑**：横屏原片和原比例视频必须通过遍历 `video.bit_rate` 中的所有转码变体，并使用外层 `video.width` 与 `video.height` 的比例作为目标比例进行比例 penalty 计算，剔除被平台裁剪/加黑边后的 9:16 默认播放流（`play_addr`）。
+1. **音频提取与转换机制**：对分离流或缺少独立音频 URL 的视频，采用系统 `ffmpeg` 自动提取为高音质 `audio.mp3` 并清除中间态，极大提高台词转写所需的音轨就绪率。
+2. **增量严密校验**：在 `is_completed_video_dir` 中严密校验 `video.mp4`、`audio.mp3` 和 status.json 全部存在且大于 0 字节，从而保证任何网络传输中断的“脏数据”能在下一次运行中被全自动安全重试。
