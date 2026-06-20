@@ -1,64 +1,49 @@
-# Python 缓存
+# ==========================================
+# 1. Python 缓存与虚拟环境
+# ==========================================
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+venv/
+.venv/
 
-# 媒体下载临时目录
+# ==========================================
+# 2. 媒体下载与临时音频/视频文件
+# ==========================================
 downloads/
 temp_video.mp4
+audio.mp3
+transcript.md
 
-# 用户敏感凭据
+# ==========================================
+# 3. 敏感凭据与外部依赖
+# ==========================================
 cookie.txt
 .auth/
 .external/
 logs/
 
-# macOS 系统残留
+# ==========================================
+# 4. 调试与抓包临时数据（仅限根目录）
+# ==========================================
+/*.html
+/*.json
+/*.png
+/*.log
+
+# ==========================================
+# 5. 代理与技能配置 (Agent & Skills Runtime)
+# ==========================================
+.memory/
+.agents/
+.pytest_cache/
+scratch/
+
+# ==========================================
+# 6. 系统与 IDE 配置
+# ==========================================
 .DS_Store
-venv/
-.venv/
+.vscode/
+.idea/
 *.dylib
 *.so
-downloads/柱子哥TzFilm/7642858757134880026/video.mp4
-downloads/柱子哥TzFilm/7647717028643556627/video.mp4
-downloads/柱子哥TzFilm/7636162735721565478/video.mp4
-downloads/柱子哥TzFilm/7645203889066724646/video.mp4
-downloads/柱子哥TzFilm/7636548062072032518/video.mp4
-downloads/柱子哥TzFilm/7641387235530525961/video.mp4
-downloads/柱子哥TzFilm/7638387584661540134/video.mp4
-downloads/柱子哥TzFilm/7642516443459751220/video.mp4
-downloads/柱子哥TzFilm/7646665973897973043/video.mp4
-downloads/柱子哥TzFilm/7629282791091358986/video.mp4
-downloads/柱子哥TzFilm/7620229921666846002/video.mp4
-downloads/柱子哥TzFilm/7626003445854696000/video.mp4
-downloads/柱子哥TzFilm/7617013879721200930/video.mp4
-downloads/柱子哥TzFilm/7630724164843834630/video.mp4
-downloads/柱子哥TzFilm/7622527949773868331/video.mp4
-downloads/柱子哥TzFilm/7618868422776032539/video.mp4
-downloads/柱子哥TzFilm/7628171122265758080/video.mp4
-downloads/柱子哥TzFilm/7621476241194929427/video.mp4
-downloads/柱子哥TzFilm/7650267641566743846/video.mp4
-downloads/柱子哥TzFilm/7619598715401096458/audio.mp3
-downloads/柱子哥TzFilm/7619598715401096458/video.mp4
-downloads/柱子哥TzFilm/7623284022780710185/video.mp4
-downloads/柱子哥TzFilm/7648778898376854818/video.mp4
-downloads/柱子哥TzFilm/7627020092957560118/video.mp4
-downloads/柱子哥TzFilm/7607633689456282703/video.mp4
-downloads/柱子哥TzFilm/7614028038887492874/video.mp4
-downloads/柱子哥TzFilm/7609172561171250676/video.mp4
-downloads/柱子哥TzFilm/7611337363885009588/video.mp4
-downloads/柱子哥TzFilm/7612849202427205620/video.mp4
-downloads/柱子哥TzFilm/7605432434842422863/video.mp4
-downloads/柱子哥TzFilm/7604286670153731378/video.mp4
-downloads/柱子哥TzFilm/7514980094625074451/video.mp4
-downloads/柱子哥TzFilm/7610192341270103138/video.mp4
-downloads/柱子哥TzFilm/7606952189660026255/video.mp4
-downloads/柱子哥TzFilm/7486407473658711296/video.mp4
-downloads/YuE悦/7628982157856475636/video.mp4
-downloads/YuE悦/7608559659657838159/video.mp4
-downloads/YuE悦/7607084320532616571/video.mp4
-downloads/YuE悦/7617054514629378021/video.mp4
-downloads/YuE悦/7595204899827352655/video.mp4
-downloads/派大星小课堂（小猫大学习）/7649258063437876480/video.mp4
-.external/runtime/jiji-full-test/dy-downloader/派大星小课堂（小猫大学习）_MS4wLjABAAAAnGUsfVKF3yUgBbvfUdXYqayWWQne-7UVlS0N_OPMw4_CqmvzNnLUbK/post/7649258063437876480/7649258063437876480.mp4
-.external/runtime/prev-ab6bc19-downloads/派大星小课堂（小猫大学习）/7649258063437876480/video.mp4
-.external/runtime/mimo-oE-downloads/派大星小课堂（小猫大学习）/7649258063437876480/video.mp4
