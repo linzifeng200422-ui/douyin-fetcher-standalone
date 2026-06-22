@@ -421,14 +421,17 @@ async def run_standalone_cookie_fetcher():
                         print("等待扫码登录：当前只检测到游客 Cookie，暂不覆盖 cookie.txt/state.json。", flush=True)
                         return
 
-                    cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+                    cookie_dict = {c['name']: c['value'] for c in cookies}
+                    filtered_dict = filter_cookies(cookie_dict)
+
+                    cookie_str = "; ".join([f"{k}={v}" for k, v in filtered_dict.items()])
                     cookie_file = Path("cookie.txt")
                     cookie_file.write_text(cookie_str, encoding="utf-8")
                     
                     # 导出完整的存储状态（包含 cookies, localStorage 等）
                     state_file = auth_dir / "state.json"
                     await context.storage_state(path=str(state_file))
-                    print(f"✓ 实时同步 {len(cookies)} 个抖音 Cookie 到 cookie.txt，存储状态已同步到 {state_file.name}...", flush=True)
+                    print(f"✓ 实时同步 {len(filtered_dict)} 个核心抖音 Cookie 到 cookie.txt，存储状态已同步到 {state_file.name}...", flush=True)
             except Exception as ex:
                 print(f"同步 Cookie/状态时发生异常: {ex}", flush=True)
 
