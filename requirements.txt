@@ -1,8 +1,17 @@
-# 抖音视频解析与文案提取工具 (独立开源版) 依赖项
-# 请确保系统已通过外部手段安装 ffmpeg 命令行工具以供转码使用 (macOS: brew install ffmpeg)
+# 抖音下载器 核心依赖
+aiohttp>=3.9.0
+aiofiles>=23.2.1
+aiosqlite>=0.19.0
+rich>=13.7.0
+pyyaml>=6.0.1
+python-dateutil>=2.8.2
+gmssl>=3.2.2
 
-# 仅在需要使用本地 Whisper ASR 语音识别服务时安装此包：
-openai-whisper
+# HTTP API Server（可选）
+fastapi>=0.100.0
+uvicorn>=0.20.0
 
-# 本地浏览器主页解析和登录态捕获依赖：
-playwright
+# 以下为可选依赖，按需安装：
+# ASR 台词转写：pip install openai-whisper
+# 浏览器兜底：pip install playwright && playwright install chromium
+# 系统级：brew install ffmpeg
