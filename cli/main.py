@@ -104,9 +104,10 @@ def fetch_user_posts(sec_user_id: str, count: int, cookie: str = "") -> dict | N
     return None
 
 
-def fetch_single_video_details(video_id: str, cookie_str: str = "") -> dict | None:
+def fetch_single_video_details(video_id: str, cookie_str: str = "", is_note: bool = False) -> dict | None:
     DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ies_url = f"https://www.iesdouyin.com/share/video/{video_id}"
+    path_type = "note" if is_note else "video"
+    ies_url = f"https://www.iesdouyin.com/share/{path_type}/{video_id}"
     cmd_fetch = [
         "curl", "-s", "-L",
         "-H", f"User-Agent: {DEFAULT_USER_AGENT}",
@@ -149,7 +150,7 @@ def fetch_single_video_details(video_id: str, cookie_str: str = "") -> dict | No
         return None
 
 
-def fetch_single_video_details_via_browser(video_id: str) -> dict | None:
+def fetch_single_video_details_via_browser(video_id: str, is_note: bool = False) -> dict | None:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -158,8 +159,8 @@ def fetch_single_video_details_via_browser(video_id: str) -> dict | None:
 
     DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     state_file = Path(".auth/state.json")
-    detail_url = f"https://www.douyin.com/video/{video_id}"
-    logger.info(f"启动 Playwright 本地浏览器解析单视频: {detail_url}")
+    detail_url = f"https://www.douyin.com/note/{video_id}" if is_note else f"https://www.douyin.com/video/{video_id}"
+    logger.info(f"启动 Playwright 本地浏览器解析单作品: {detail_url}")
 
     detail_data = None
     with sync_playwright() as p:
@@ -178,19 +179,30 @@ def fetch_single_video_details_via_browser(video_id: str) -> dict | None:
 
         page = context.new_page()
         try:
-            def expect_detail_filter(r):
-                return "aweme/v1/web/aweme/detail" in r.url and r.status == 200
-
-            with page.expect_response(expect_detail_filter, timeout=25000) as response_info:
-                page.goto(detail_url, wait_until="load")
+            page.goto(detail_url, wait_until="load", timeout=20000)
+            page.wait_for_timeout(1000)
             
-            response = response_info.value
-            page.wait_for_timeout(800)
-            body = response.body()
-            res_json = json.loads(body.decode("utf-8"))
-            detail_data = res_json.get("aweme_detail")
+            fetch_script = """
+            async (awemeId) => {
+                const url = `/aweme/v1/web/aweme/detail/?device_platform=webapp&aid=6383&channel=channel_pc_web&aweme_id=${awemeId}`;
+                try {
+                    const response = await fetch(url);
+                    if (response.ok) {
+                        return await response.json();
+                    }
+                    return { error: `HTTP status ${response.status}` };
+                } catch (e) {
+                    return { error: e.toString() };
+                }
+            }
+            """
+            res_json = page.evaluate(fetch_script, video_id)
+            if res_json and "aweme_detail" in res_json:
+                detail_data = res_json.get("aweme_detail")
+            else:
+                logger.error(f"在浏览器内发起详情 API 请求返回异常: {res_json}")
         except Exception as ex:
-            logger.error(f"在浏览器中拦截视频 {video_id} 详情 API 失败: {ex}")
+            logger.error(f"在浏览器中获取视频 {video_id} 详情失败: {ex}")
             
         context.close()
         browser.close()
@@ -331,6 +343,9 @@ def scrape_user_videos_via_browser(sec_user_id: str, count: int) -> tuple[list[d
 
 
 def main_sync(config: ConfigLoader):
+    from utils.logger import set_console_log_level
+    import logging
+    set_console_log_level(logging.INFO)
     urls = config.get_links()
     if not urls:
         logger.warning("配置文件中未配置有效 link，优雅退出。")
@@ -575,26 +590,30 @@ def main_sync(config: ConfigLoader):
                 logger.error("F2 后端当前仅用于博主主页作品分页；单视频请使用 auto/legacy/yt-dlp。")
                 continue
                 
-            logger.info("按单视频分享链接进行本地免 Cookie HTML 解密...")
+            is_note = "note" in final_url or "gallery" in final_url
+            label = "图集" if is_note else "视频"
+            logger.info(f"按单{label}分享链接进行本地免 Cookie HTML 解密...")
             video_id_match = re.search(r'video/(\d+)', final_url)
+            if not video_id_match:
+                video_id_match = re.search(r'note/(\d+)', final_url)
             if not video_id_match:
                 video_id_match = re.search(r'/(\d+)(?:\?|$)', final_url)
             if not video_id_match:
-                logger.error(f"无法从最终重定向链接中提取出视频数字 ID: {final_url}")
+                logger.error(f"无法从最终重定向链接中提取出作品数字 ID: {final_url}")
                 continue
                 
             video_id = video_id_match.group(1)
-            logger.info(f"成功提取视频 ID: {video_id}。开始解析详情...")
+            logger.info(f"成功提取作品 ID: {video_id}。开始解析详情...")
             
-            video_data = fetch_single_video_details(video_id, cookie_str)
+            video_data = fetch_single_video_details(video_id, cookie_str, is_note=is_note)
             if not video_data:
-                logger.warning("通过免 Cookie HTML 解密单视频失败，尝试使用本地浏览器拦截解析...")
-                video_data = fetch_single_video_details_via_browser(video_id)
+                logger.warning(f"通过免 Cookie HTML 解密单{label}失败，尝试使用本地浏览器拦截解析...")
+                video_data = fetch_single_video_details_via_browser(video_id, is_note=is_note)
             if video_data:
                 aweme_list = [video_data]
                 nickname = video_data.get("author", {}).get("nickname") or video_data.get("nickname") or "未命名账号"
             else:
-                logger.error("解析单视频网页数据失败。")
+                logger.error(f"解析单{label}网页数据失败。")
                 continue
             source_path = "single_video"
 
@@ -613,6 +632,7 @@ def main_sync(config: ConfigLoader):
             source_path=source_path,
             video_quality=video_quality,
             video_orientation=video_orientation,
+            comments_cfg=config.get("comments") or {},
         )
         logger.info(
             "链接处理结束：成功 %s / 跳过 %s / 失败 %s / 总计 %s",

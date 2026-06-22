@@ -453,6 +453,7 @@ def process_aweme_list(
   source_path: str,
   video_quality: str,
   video_orientation: str,
+  comments_cfg: dict | None = None,
 ) -> dict[str, int]:
   log = setup_logger("UserDownloader")
   account_folder = sanitize_folder_name(nickname)
@@ -601,6 +602,50 @@ def process_aweme_list(
         continue
 
     write_meta_file(video_dir, aweme, nickname)
+
+    # 爬取评论逻辑（若开启）
+    if comments_cfg and comments_cfg.get("enabled"):
+      log.info("开始拉取该作品的评论列表...")
+      try:
+        from core.comments_collector import CommentsCollector
+        from core.api_client import DouyinAPIClient
+        from storage.metadata_handler import MetadataHandler
+        from utils.cookie_utils import parse_cookie_header
+        import asyncio
+
+        cookie_dict = parse_cookie_header(cookie_str)
+        api_client = DouyinAPIClient(cookies=cookie_dict)
+        metadata_handler = MetadataHandler()
+        collector = CommentsCollector(
+          api_client,
+          metadata_handler,
+          include_replies=bool(comments_cfg.get("include_replies", False)),
+          max_comments=int(comments_cfg.get("max_comments", 0) or 0),
+          page_size=int(comments_cfg.get("page_size", 20) or 20),
+        )
+        comments_path = video_dir / f"{aweme_id}_comments.json"
+        
+        async def run_collect():
+          async with api_client:
+            return await collector.collect_and_save(aweme_id, comments_path)
+
+        try:
+          loop = asyncio.get_event_loop()
+        except RuntimeError:
+          loop = asyncio.new_event_loop()
+          asyncio.set_event_loop(loop)
+        
+        if loop.is_running():
+          import nest_asyncio
+          nest_asyncio.apply()
+          loop.run_until_complete(run_collect())
+        else:
+          asyncio.run(run_collect())
+
+        log.info("评论保存成功！")
+      except Exception as ce:
+        log.error(f"评论爬取失败: {ce}")
+
     try:
       finalize_transcript(
         audio_path,
