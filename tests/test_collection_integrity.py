@@ -1,14 +1,10 @@
 import json
 
-from douyin_parser import (
-    collection_incomplete_reason,
-    collection_target_count,
-    get_aweme_media_selection,
-    is_completed_video_dir,
-    merge_aweme_lists_by_id,
-)
-from external_backends import build_dy_downloader_config, dy_downloader_quality
-from get_cookie import has_login_cookie
+from utils.helpers import collection_incomplete_reason, collection_target_count
+from core.downloader_base import get_aweme_media_selection, is_completed_video_dir
+from core.user_downloader import merge_aweme_lists_by_id
+from backends.dy_downloader_backend import build_dy_downloader_config, dy_downloader_quality
+from tools.cookie_fetcher import has_login_cookie
 
 
 def test_all_requires_profile_total_to_match():
