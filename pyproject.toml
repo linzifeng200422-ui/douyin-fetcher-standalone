@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "douyin-downloader"
 version = "2.0.0"
-description = "抖音下载器 - 支持视频/图集/合集/音乐批量下载、ASR台词转写、多后端架构"
+description = "【免责声明：本项目仅用于学术研究与技术交流，使用者自担风险】抖音下载器 - 支持视频/图集/合集/音乐/评论批量下载、ASR台词转写、多后端架构"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
