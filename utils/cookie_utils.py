@@ -43,3 +43,20 @@ def parse_cookie_header(cookie_header: str) -> Dict[str, str]:
             continue
         parsed[key] = value.strip()
     return parsed
+
+
+def redact_cookie_values(cookie_str: str) -> str:
+    """将 Cookie 值脱敏（仅保留前3字符）。"""
+    if not cookie_str:
+        return ""
+    parts = []
+    for pair in cookie_str.split(";"):
+        pair = pair.strip()
+        if "=" in pair:
+            name, _, value = pair.partition("=")
+            redacted = value[:3] + "***" if len(value) > 3 else value
+            parts.append(f"{name.strip()}={redacted}")
+        else:
+            parts.append(pair)
+    return "; ".join(parts)
+

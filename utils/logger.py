@@ -2,12 +2,12 @@ import logging
 import sys
 from pathlib import Path
 
-_APP_LOGGER_PREFIX = "dy-downloader"
+_APP_LOGGER_PREFIX = "抖音下载器"
 _KNOWN_LOGGER_NAMES = set()
 
 
 def setup_logger(
-    name: str = "dy-downloader",
+    name: str = "抖音下载器",
     level: int = logging.INFO,
     log_file: str = None,
     console_level: int = logging.ERROR,
