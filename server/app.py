@@ -143,7 +143,7 @@ def build_app(config: ConfigLoader) -> FastAPI:
     app = FastAPI(
         title="Douyin Downloader API",
         version="1.0",
-        description="REST API for dispatching Douyin download jobs.",
+        description="REST API for dispatching Douyin download jobs. DISCLAIMER: This tool is strictly for technical research and learning. The user assumes all risks and legal liabilities.",
         lifespan=lifespan,
     )
     app.state.job_manager = manager

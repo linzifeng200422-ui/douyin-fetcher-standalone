@@ -2,6 +2,8 @@
 
 A strictly YAML-driven, fully independent open-source tool for downloading Douyin videos, albums, and audios (Chinese name: 抖音下载器). It supports batch-fetching blogger homepages, high-resolution media downloading, local FFmpeg audio extraction, and ASR transcript extraction using local Whisper scripts.
 
+> ⚠️ **Disclaimer**: This tool is strictly for technical research and education purposes. Please refer to the [Disclaimer](#disclaimer) section at the bottom for details.
+
 ## Features
 
 *   **Strictly YAML-Driven**: No tedious command-line arguments. All configurations are located in `config.yml`.
@@ -87,3 +89,18 @@ Downloaded/
 ```
 
 Resume Criteria: A folder is considered fully downloaded and skipped in subsequent runs only if `video.mp4` (or all images in a gallery) and `audio.mp3` are non-empty, and `status` in `collection-status.json` is `success`.
+
+## Disclaimer
+
+This project is intended solely for academic research, technical exchange, and personal data backup. Please use it in compliance with applicable local laws and regulations.
+
+- **Legal Compliance**: Users must strictly comply with applicable cybersecurity, data security, and copyright laws when using this project.
+- **Fair Use Only**: This tool is for personal study and legitimate data archiving. It is strictly prohibited to use this project to violate privacy, infringe copyrights, generate commercial profits, harvest sensitive information, or for any other illegal purposes.
+- **No Liability**: Users assume all risks and liabilities arising from the use of this project. The author makes no warranties and shall not be held liable for any direct or indirect damages, losses, or legal disputes caused by its use.
+- **API Risks**: All interfaces used by this project are based on normal browser rendering protocols and public network traffic. Any functional restriction or failure due to platform rule updates or security counter-measures constitutes normal technical risk.
+
+By using this project, you acknowledge that you have read, understood, and agreed to all of the terms listed in this disclaimer.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](./LICENSE) file for details.
