@@ -143,6 +143,8 @@ def resolve_share_url(url: str, cookie_str: str = None) -> tuple:
 
         # 匹配博主个人主页模式
         user_match = re.search(r'share/user/([a-zA-Z0-9_-]+)', final_url)
+        if not user_match:
+            user_match = re.search(r'douyin\.com/user/([a-zA-Z0-9_-]+)', final_url)
         if user_match:
             sec_user_id = user_match.group(1)
         else:

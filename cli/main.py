@@ -330,7 +330,7 @@ def scrape_user_videos_via_browser(sec_user_id: str, count: int) -> tuple[list[d
     return aweme_details, nickname
 
 
-async def main_async(config: ConfigLoader):
+def main_sync(config: ConfigLoader):
     urls = config.get_links()
     if not urls:
         logger.warning("配置文件中未配置有效 link，优雅退出。")
@@ -652,6 +652,10 @@ def main():
     print("====================================================")
 
     config_path = args.config
+    if not Path(config_path).exists() and not args.serve:
+        logger.error(f"配置文件未找到: {config_path}")
+        sys.exit(1)
+
     config = ConfigLoader(config_path if Path(config_path).exists() else None)
     
     if args.serve or (config.get("server") or {}).get("enabled", False):
@@ -664,7 +668,7 @@ def main():
             sys.exit(0)
     else:
         try:
-            asyncio.run(main_async(config))
+            main_sync(config)
         except KeyboardInterrupt:
             print("\n下载任务被用户中断")
             sys.exit(0)
