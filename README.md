@@ -1,180 +1,89 @@
-# 抖音视频解析与文案提取工具 (Douyin Fetcher Standalone)
+# Douyin Downloader
 
-这是一个完全独立的开源抖音视频解析与文案提取工具。支持抖音博主主页作品分页抓取、统一输出目录、音轨提取，并可调用本地 Whisper 开展 ASR 台词还原。
+A strictly YAML-driven, fully independent open-source tool for downloading Douyin videos, albums, and audios (Chinese name: 抖音下载器). It supports batch-fetching blogger homepages, high-resolution media downloading, local FFmpeg audio extraction, and ASR transcript extraction using local Whisper scripts.
 
-本工具为独立项目，不依赖任何第三方内容校准框架。
+## Features
 
-当前推荐抖音主页主后端是 [Johnserf-Seed/f2](https://github.com/Johnserf-Seed/f2)。本项目复用 F2 的作品列表分页、A-Bogus 签名和单作品 detail 能力，不使用 F2 的 `--auto-cookie`。登录态仍通过本项目的 `get_cookie.py` 写入 `cookie.txt` 和 `.auth/`。
-
-注意：抖音主页分页经常出现“第一页正常、第二页空 200”的风控现象。现在程序会读取主页 `aweme_count` 做完整性校验；如果 F2 只拿到部分作品，会启动浏览器主页兜底和 detail 回补，仍不完整则退出失败，不会把 21/22 条误报为全量完成。
-
-## 系统要求 (System Requirements)
-
-*   **Python**: 3.8 或更高版本
-*   **FFmpeg**: 用于音视频转码与合并。请确保 `ffmpeg` 命令在系统 PATH 中。
-    *   macOS 安装命令：`brew install ffmpeg`
+*   **Strictly YAML-Driven**: No tedious command-line arguments. All configurations are located in `config.yml`.
+*   **Multi-Backend Architecture**:
+    *   `auto`: Default. Downloads Douyin homepages via F2 backend and delegates other platform links to `yt-dlp`.
+    *   `f2`: An efficient scraper for Douyin posts based on [Johnserf-Seed/f2](https://github.com/Johnserf-Seed/f2).
+    *   `yt-dlp`: Used for non-Douyin video platforms.
+    *   `dy-downloader`: Integrates [jiji262/douyin-downloader](https://github.com/jiji262/douyin-downloader) as an alternative backend.
+    *   `legacy`: Fallback using public APIs and Playwright network interceptors.
+*   **Browser Fallback & Detail Fill**: Automatically launches a Playwright headless/headed browser session to bypass Douyin's pagination blockages, and leverages F2 detail APIs to retrieve missing metadata for scraped video IDs.
+*   **Audio Extraction & Whisper ASR**: Automatically extracts audio tracks (`audio.mp3`) using FFmpeg if a standalone audio stream is missing, and transcribes spoken text into `transcript.md` via local OpenAI Whisper.
+*   **Robust Incremental Resume**: Checks the integrity of downloaded media files and `collection-status.json`. Interrupted downloads (e.g. `Ctrl+C` or network drops) will be automatically retried and resolved in the next run.
 
 ---
 
-## 快速上手 (Quick Start)
+## System Requirements
 
-### 1. 安装 Python 依赖
+*   **Python**: 3.8 or higher.
+*   **FFmpeg**: Required for audio transcoding and extraction. Make sure `ffmpeg` is available in your system's `PATH`.
+    *   macOS installation: `brew install ffmpeg`
+
+---
+
+## Quick Start
+
+### 1. Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. 下载单个视频
-```bash
-python3 douyin_parser.py --url "https://v.douyin.com/abcde12/"
-```
-
-### 3. 扫码保存抖音 Cookie
+### 2. Log in and Save Cookie
 ```bash
 python3 get_cookie.py
 ```
+Scan the QR code in the browser. The session state will be written to `cookie.txt` and `.auth/state.json`.
 
-扫码登录后确认当前目录生成或更新：
+### 3. Setup `config.yml`
+Copy the example config:
+```bash
+cp config.example.yml config.yml
+```
+Fill in the links you want to download and your preferences in `config.yml`. Example:
+```yaml
+link:
+  - https://www.douyin.com/user/MS4wLjABAAAA6O7EZyfDRYXxJrUTpf91K3tmB4rBROkAw-nYMfld8ss
 
+path: ./Downloaded/
+
+backend: "auto"
+video_quality: "resolution"
+
+transcript:
+  enabled: false
+```
+
+### 4. Run the Downloader
+```bash
+python3 run.py
+```
+The program will load your local credentials, process each link sequentially, and save all downloaded media.
+
+### 5. Launch REST API Server
+```bash
+python3 run.py --serve
+```
+Or set `server.enabled: true` in `config.yml`. This allows adding download tasks programmatically (requires `fastapi` and `uvicorn` packages).
+
+---
+
+## Output Folder Structure
+
+Downloads will be saved under the designated path structured by blogger nickname and video ID:
 ```text
-cookie.txt
-.auth/state.json
+Downloaded/
+└── <Blogger Nickname>/
+    └── <19-digit Video ID>/
+        ├── video.mp4               # Watermark-free video
+        ├── image_1.jpg             # Image files (if it is a photo gallery)
+        ├── audio.mp3               # Audio track
+        ├── meta.md                 # Statistics and descriptions (Markdown)
+        ├── transcript.md           # Transcribed spoken text (Markdown)
+        └── collection-status.json  # Runtime status indicators (JSON)
 ```
 
-关闭扫码浏览器后再次运行 `python3 get_cookie.py`，如果浏览器仍保持登录态，就说明 Cookie 持久化正常。
-
-### 4. 探测主页作品列表，不下载
-```bash
-python3 douyin_parser.py \
-  --url "https://v.douyin.com/user_home_link/" \
-  --backend f2 \
-  --list-only
-```
-
-### 5. 下载主页最近 1 个作品，跳过 ASR
-```bash
-python3 douyin_parser.py \
-  --url "https://v.douyin.com/user_home_link/" \
-  --backend f2 \
-  --count 1 \
-  --skip-asr
-```
-
-### 6. 全量下载博主主页作品
-```bash
-python3 douyin_parser.py \
-  --url "https://v.douyin.com/user_home_link/" \
-  --backend f2 \
-  --all \
-  --skip-asr
-```
-
-`--all` 会让 F2 按 `max_cursor/has_more` 分页模型拉取全部可访问作品。中途 `Ctrl+C` 后，已成功写入 `video.mp4`、`audio.mp3` 且 `collection-status.json(status=success)` 的作品会在下次运行时跳过。
-如果 F2 返回数量少于主页 `aweme_count`，默认会打开浏览器兜底：
-
-```bash
-python3 douyin_parser.py \
-  --url "https://v.douyin.com/user_home_link/" \
-  --backend f2 \
-  --all \
-  --skip-asr
-```
-
-浏览器兜底会滚动主页、拦截 `/aweme/v1/web/aweme/post/`，并对只拿到 ID 的作品用 F2 detail API 补元数据。若出现验证码或登录弹窗，请在弹出的浏览器里处理。调试时可以关闭兜底，只看 F2 原始列表完整性：
-
-```bash
-python3 douyin_parser.py \
-  --url "https://v.douyin.com/user_home_link/" \
-  --backend f2 \
-  --all \
-  --list-only \
-  --no-browser-fallback
-```
-
-### 7. 批量拉取个人主页最近作品
-```bash
-python3 douyin_parser.py \
-  --url "https://v.douyin.com/user_home_link/" \
-  --backend f2 \
-  --count 5
-```
-
-### 8. 加载 Cookie 进行请求
-```bash
-# 传入字符串
-python3 douyin_parser.py --url "https://v.douyin.com/..." --cookie "ttwid=xxx; sessionid=yyy"
-
-# 传入本地 txt 文件
-python3 douyin_parser.py --url "https://v.douyin.com/..." --cookie-file "./cookie.txt"
-```
-
----
-
-## 后端选择
-
-```bash
-python3 douyin_parser.py --url "<链接>" --backend auto
-python3 douyin_parser.py --url "<抖音主页链接>" --backend f2 --all --skip-asr
-python3 douyin_parser.py --url "<通用视频链接>" --backend yt-dlp
-python3 douyin_parser.py --url "<抖音链接>" --backend legacy --count 3
-```
-
-后端含义：
-
-*   `auto`：默认模式。抖音主页优先走 F2；通用非抖音链接交给 `yt-dlp`。
-*   `f2`：抖音博主主页主后端，支持 `--all`；先用主页分页，必要时浏览器滚动主页和 F2 detail 回补，不逐个打开视频网页。
-*   `yt-dlp`：通用视频链接后端，只负责下载，最终目录仍由本项目归一化。
-*   `legacy`：旧公共 API / 本地 API / Playwright 兜底逻辑，不支持 `--all`。
-
-F2 不存在时，脚本会自动创建隔离环境 `.external/venv-f2` 并安装 `f2`。如只想检查本机环境，不希望自动安装：
-
-```bash
-python3 douyin_parser.py --url "<抖音主页链接>" --backend f2 --list-only --no-install-f2
-```
-
-F2 的临时输入配置写入 `.external/runtime/`，权限为 `0600`，执行后清理。Cookie 不会出现在 F2 子进程命令行参数里。
-
-相关兜底参数：
-
-```bash
---browser-fallback / --no-browser-fallback
---browser-headless
---browser-max-scrolls 240
---browser-wait-timeout 600
---detail-fill / --no-detail-fill
-```
-
----
-
-## Cookie 稳定性测试
-
-建议按下面顺序测试：
-
-```bash
-python3 get_cookie.py
-test -s cookie.txt
-test -s .auth/state.json
-python3 get_cookie.py
-python3 get_cookie.py
-```
-
-第一次扫码后关闭浏览器；第二、三次启动时应复用 `.auth/` 登录态，不需要重新扫码。若手动破坏 `cookie.txt`，`--backend f2` 会明确提示重新运行 `get_cookie.py`，不会静默回退到错误数据。
-
----
-
-## 输出目录结构
-
-下载与解析成功后，本脚本会在 `downloads/` 生成标准的脚手架：
-```text
-downloads/
-└── <博主昵称>/
-    └── <19位视频ID>/
-        ├── video.mp4               # 无水印视频
-        ├── audio.mp3               # 提取无水印音频
-        ├── meta.md                 # 播放量、点赞量等统计元数据 (Markdown)
-        ├── transcript.md           # Whisper 转录台词文案 (Markdown)
-        └── collection-status.json  # 采集状态运行指标 (JSON)
-```
-
-断点续跑判断条件为：`video.mp4` 和 `audio.mp3` 都存在且非空，同时 `collection-status.json` 中 `status` 为 `success`。失败、中断或 ASR 失败的作品不会被当成已完成，会在重跑时重新处理。
-
-若需了解底层解析与抓取原理（iesdouyin 网页参数解密及接口请求流），请参阅 [skills/SKILL.md](skills/SKILL.md) 详细文档。
+Resume Criteria: A folder is considered fully downloaded and skipped in subsequent runs only if `video.mp4` (or all images in a gallery) and `audio.mp3` are non-empty, and `status` in `collection-status.json` is `success`.
